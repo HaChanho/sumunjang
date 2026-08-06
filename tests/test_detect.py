@@ -72,3 +72,49 @@ def test_Luhn_검증에_실패하는_숫자열은_카드번호로_보지_않는�
     findings = detect(text)
 
     assert [f for f in findings if f.category == "CARD"] == []
+
+
+def test_체크섬이_유효한_사업자등록번호를_탐지한다():
+    text = "거래처 사업자등록번호 123-45-67891 입니다"
+
+    findings = detect(text)
+
+    assert len(findings) == 1
+    assert findings[0].category == "BRN"
+    assert text[findings[0].start : findings[0].end] == "123-45-67891"
+
+
+def test_API_키를_탐지한다():
+    """개발자가 코드·설정을 붙여넣을 때 가장 위험한 유출 경로."""
+    text = "export ANTHROPIC_API_KEY=sk-ant-api03-QkxBSDEyMzQ1Njc4OTBhYmNkZQ"
+
+    findings = detect(text)
+
+    secrets = [f for f in findings if f.category == "SECRET"]
+    assert len(secrets) == 1
+    assert text[secrets[0].start : secrets[0].end].startswith("sk-ant-")
+
+
+def test_전각_숫자로_쓴_주민등록번호도_탐지한다():
+    """전각 숫자는 눈으로는 같아 보이지만 코드포인트가 달라 정규식을 빠져나간다."""
+    text = "고객 ９００１０１-１２３４５６８ 확인"
+
+    findings = detect(text)
+
+    assert len(findings) == 1
+    assert findings[0].category == "RRN"
+    assert text[findings[0].start : findings[0].end] == "９００１０１-１２３４５６８"
+
+
+def test_제로폭_문자가_끼어든_주민등록번호도_원문_좌표로_탐지한다():
+    """보이지 않는 문자를 끼워넣는 것은 가장 값싼 우회 수단이다.
+
+    정규화 후 매칭하되, 좌표는 반드시 원문 기준이어야 마스킹이 정확해진다.
+    """
+    text = "고객 900101-123​4568 확인"
+
+    findings = detect(text)
+
+    assert len(findings) == 1
+    assert findings[0].category == "RRN"
+    assert text[findings[0].start : findings[0].end] == "900101-123​4568"

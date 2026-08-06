@@ -22,6 +22,28 @@ _EMAIL_PATTERN = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 # 카드번호: 4자리 4묶음
 _CARD_PATTERN = re.compile(r"\d{4}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}")
 
+# 사업자등록번호: 3-2-5 형식
+_BRN_PATTERN = re.compile(r"\d{3}-\d{2}-\d{5}")
+_BRN_WEIGHTS = (1, 3, 7, 1, 3, 7, 1, 3, 5)
+
+# API 키·토큰. 개발자가 코드나 설정을 붙여넣을 때 함께 새어나가는 경로다.
+# 각 제공자가 공표한 접두사만 사용한다 — 접두사 없는 임의 문자열까지 잡으려 하면
+# 오탐이 폭증한다.
+_SECRET_PATTERN = re.compile(
+    r"\b(?:"
+    r"sk-ant-[A-Za-z0-9_-]{16,}"      # Anthropic
+    r"|sk-[A-Za-z0-9_-]{20,}"          # OpenAI
+    r"|gh[pousr]_[A-Za-z0-9]{36,}"     # GitHub
+    r"|AKIA[0-9A-Z]{16}"               # AWS Access Key ID
+    r"|xox[baprs]-[A-Za-z0-9-]{10,}"   # Slack
+    r")"
+)
+
+
+# 눈에 보이지 않아 탐지를 빠져나가는 문자들. 전각 숫자는 별도 처리가 필요 없다 —
+# 파이썬 정규식의 \d와 int()가 유니코드 십진 숫자를 그대로 인식하기 때문이다.
+_INVISIBLE = "​‌‍⁠﻿"
+
 
 @dataclass(frozen=True)
 class Finding:
@@ -30,6 +52,23 @@ class Finding:
     category: str
     start: int
     end: int
+
+
+def _strip_invisible(text: str) -> tuple[str, list[int]]:
+    """보이지 않는 문자를 걷어낸 텍스트와, 각 글자가 원문 어디서 왔는지의 인덱스.
+
+    마스킹은 언제나 원문 좌표 위에서 일어나야 하므로 정규화된 문자열만으로는
+    부족하다. 되돌아갈 지도를 함께 들고 다닌다.
+    """
+    if not any(ch in _INVISIBLE for ch in text):
+        return text, list(range(len(text)))
+    chars, origin = [], []
+    for index, char in enumerate(text):
+        if char in _INVISIBLE:
+            continue
+        chars.append(char)
+        origin.append(index)
+    return "".join(chars), origin
 
 
 def _rrn_checksum_ok(digits: str) -> bool:
@@ -79,23 +118,52 @@ def _luhn_ok(digits: str) -> bool:
     return total % 10 == 0
 
 
+def _brn_checksum_ok(digits: str) -> bool:
+    """사업자등록번호 검증. 9번째 자리는 가중치를 곱한 뒤 십의 자리를 따로 더한다."""
+    total = sum(int(d) * w for d, w in zip(digits[:9], _BRN_WEIGHTS))
+    total += (int(digits[8]) * 5) // 10
+    return (10 - (total % 10)) % 10 == int(digits[9])
+
+
+def _rrn_valid(matched: str) -> bool:
+    digits = matched.replace("-", "")
+    return _rrn_checksum_ok(digits) or _rrn_birthdate_ok(digits)
+
+
+def _card_valid(matched: str) -> bool:
+    return _luhn_ok(re.sub(r"[-\s]", "", matched))
+
+
+def _brn_valid(matched: str) -> bool:
+    return _brn_checksum_ok(matched.replace("-", ""))
+
+
+# 규칙 표: (카테고리, 패턴, 검증기). 검증기가 없으면 패턴만으로 확정한다.
+_RULES = (
+    ("RRN", _RRN_PATTERN, _rrn_valid),
+    ("BRN", _BRN_PATTERN, _brn_valid),
+    ("CARD", _CARD_PATTERN, _card_valid),
+    ("PHONE", _PHONE_PATTERN, None),
+    ("EMAIL", _EMAIL_PATTERN, None),
+    ("SECRET", _SECRET_PATTERN, None),
+)
+
+
 def detect(text: str) -> list[Finding]:
+    """텍스트에서 한국 개인정보·시크릿을 찾아 원문 좌표로 돌려준다."""
+    scan_text, origin = _strip_invisible(text)
     findings = []
 
-    for match in _RRN_PATTERN.finditer(text):
-        digits = match.group().replace("-", "")
-        if _rrn_checksum_ok(digits) or _rrn_birthdate_ok(digits):
-            findings.append(Finding(category="RRN", start=match.start(), end=match.end()))
+    for category, pattern, validator in _RULES:
+        for match in pattern.finditer(scan_text):
+            if validator is not None and not validator(match.group()):
+                continue
+            findings.append(
+                Finding(
+                    category=category,
+                    start=origin[match.start()],
+                    end=origin[match.end() - 1] + 1,
+                )
+            )
 
-    for match in _PHONE_PATTERN.finditer(text):
-        findings.append(Finding(category="PHONE", start=match.start(), end=match.end()))
-
-    for match in _EMAIL_PATTERN.finditer(text):
-        findings.append(Finding(category="EMAIL", start=match.start(), end=match.end()))
-
-    for match in _CARD_PATTERN.finditer(text):
-        digits = re.sub(r"[-\s]", "", match.group())
-        if _luhn_ok(digits):
-            findings.append(Finding(category="CARD", start=match.start(), end=match.end()))
-
-    return findings
+    return sorted(findings, key=lambda f: (f.start, f.end))
