@@ -125,6 +125,93 @@ def test_요청마다_무엇을_가렸는지_기록한다():
     assert "900101-1234568" not in json.dumps(record["upstream_body"], ensure_ascii=False)
 
 
+def test_같은_값이_반복돼도_이번_요청에서_가린_건수를_보고한다():
+    """세션에 이미 등록된 값이라고 0건으로 보고하면 작동을 멈춘 것처럼 보인다.
+
+    실제 왕복에서 드러난 결함이다. Claude Code는 매 요청마다 같은 시스템 프롬프트를
+    보내는데, 두 번째 요청부터 "가린 항목 0건"으로 찍혔다.
+    """
+    records: list[dict] = []
+    body = {
+        "model": "claude-test",
+        "messages": [{"role": "user", "content": "연락처 010-1234-5678"}],
+    }
+
+    async def scenario():
+        upstream = UpstreamRecorder()
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=upstream), base_url="http://upstream"
+        ) as upstream_client:
+            app = create_app(
+                upstream_base_url="http://upstream",
+                client=upstream_client,
+                on_request=records.append,
+            )
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://proxy"
+            ) as proxy_client:
+                await proxy_client.post("/v1/messages", json=body)
+                await proxy_client.post("/v1/messages", json=body)
+
+    asyncio.run(scenario())
+
+    assert len(records) == 2
+    # 두 번째 요청도 같은 값을 가렸다. 새로 등록되지 않았을 뿐이다.
+    assert records[1]["masked_count"] == 1
+    assert records[1]["categories"] == ["PHONE"]
+    assert records[1]["new_count"] == 0
+
+
+def test_thinking과_도구호출_블록도_delta로_흘려보낸다():
+    """실제 왕복에서 드러난 결함.
+
+    Anthropic SSE 규약은 content_block_start 에 빈 껍데기를 보내고 내용을 전부
+    delta 로 흘린다. 클라이언트는 start 를 무시하고 delta 만 누적하므로,
+    start 에만 내용을 담으면 thinking 이 빈 채로 남고 다음 턴에 400 을 맞는다.
+    """
+    from sumunjang.proxy import _as_sse_events
+
+    message = {
+        "id": "msg_1",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+            {"type": "thinking", "thinking": "속으로 생각한 내용", "signature": "sig-abc"},
+            {"type": "text", "text": "답변입니다"},
+            {"type": "tool_use", "id": "toolu_1", "name": "Read", "input": {"path": "/tmp/a"}},
+        ],
+    }
+
+    events = _as_sse_events(message)
+    by_name: dict[str, list[dict]] = {}
+    for name, data in events:
+        by_name.setdefault(name, []).append(data)
+
+    starts = by_name["content_block_start"]
+    deltas = by_name["content_block_delta"]
+
+    # start 는 빈 껍데기여야 한다
+    assert starts[0]["content_block"] == {"type": "thinking", "thinking": "", "signature": ""}
+    assert starts[1]["content_block"] == {"type": "text", "text": ""}
+    assert starts[2]["content_block"]["input"] == {}
+
+    # 내용은 delta 로 간다
+    delta_types = [d["delta"]["type"] for d in deltas]
+    assert "thinking_delta" in delta_types
+    assert "signature_delta" in delta_types
+    assert "text_delta" in delta_types
+    assert "input_json_delta" in delta_types
+
+    thinking_delta = next(d for d in deltas if d["delta"]["type"] == "thinking_delta")
+    assert thinking_delta["delta"]["thinking"] == "속으로 생각한 내용"
+
+    signature_delta = next(d for d in deltas if d["delta"]["type"] == "signature_delta")
+    assert signature_delta["delta"]["signature"] == "sig-abc"
+
+    input_delta = next(d for d in deltas if d["delta"]["type"] == "input_json_delta")
+    assert json.loads(input_delta["delta"]["partial_json"]) == {"path": "/tmp/a"}
+
+
 async def _stream_roundtrip(request_body: dict) -> tuple[dict, str]:
     """스트리밍 요청을 왕복하고 (업스트림이 받은 것, 사용자가 받은 SSE 원문)."""
     upstream = UpstreamRecorder()

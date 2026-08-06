@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import copy
+import json
 from typing import Any
 
 from .mask import Session, mask, restore
@@ -40,6 +41,16 @@ def _mask_block(block: Any, session: Session) -> Any:
     # 모델은 원문을 본 적이 없으므로 여기에 원문 개인정보가 있을 수 없다.
 
     return block
+
+
+def count_masked(body: dict) -> list[str]:
+    """이 본문에서 가려진 자리의 카테고리 목록.
+
+    세션에 이미 등록된 값인지와 무관하게, 이번 요청에서 실제로 가려진 것을 센다.
+    """
+    from .mask import placeholders_in
+
+    return placeholders_in(json.dumps(body, ensure_ascii=False))
 
 
 def mask_request(body: dict, session: Session) -> dict:

@@ -12,7 +12,7 @@ from typing import Any
 
 import httpx
 
-from .anthropic import mask_request, restore_response
+from .anthropic import count_masked, mask_request, restore_response
 from .mask import Session
 
 ANTHROPIC_API = "https://api.anthropic.com"
@@ -47,27 +47,49 @@ def _as_sse_events(message: dict) -> list[tuple[str, dict]]:
     ]
 
     for index, block in enumerate(blocks):
+        kind = block.get("type")
+
+        # start 는 빈 껍데기여야 한다. 클라이언트는 start 의 내용을 무시하고 delta 만
+        # 누적하므로, 여기에 내용을 담으면 그대로 유실된다. thinking 이 빈 채로 남아
+        # 다음 턴 요청이 400 으로 거부되는 문제를 실제 왕복에서 만났다.
+        if kind == "thinking":
+            shell = {"type": "thinking", "thinking": "", "signature": ""}
+        elif kind == "text":
+            shell = {"type": "text", "text": ""}
+        elif kind == "tool_use":
+            shell = {**block, "input": {}}
+        else:
+            shell = block
+
         events.append(
             (
                 "content_block_start",
-                {
-                    "type": "content_block_start",
-                    "index": index,
-                    "content_block": {**block, "text": ""} if block.get("type") == "text" else block,
-                },
+                {"type": "content_block_start", "index": index, "content_block": shell},
             )
         )
-        if block.get("type") == "text":
+
+        deltas: list[dict] = []
+        if kind == "thinking":
+            deltas.append({"type": "thinking_delta", "thinking": block.get("thinking", "")})
+            deltas.append({"type": "signature_delta", "signature": block.get("signature", "")})
+        elif kind == "text":
+            deltas.append({"type": "text_delta", "text": block.get("text", "")})
+        elif kind == "tool_use":
+            deltas.append(
+                {
+                    "type": "input_json_delta",
+                    "partial_json": json.dumps(block.get("input", {}), ensure_ascii=False),
+                }
+            )
+
+        for delta in deltas:
             events.append(
                 (
                     "content_block_delta",
-                    {
-                        "type": "content_block_delta",
-                        "index": index,
-                        "delta": {"type": "text_delta", "text": block.get("text", "")},
-                    },
+                    {"type": "content_block_delta", "index": index, "delta": delta},
                 )
             )
+
         events.append(("content_block_stop", {"type": "content_block_stop", "index": index}))
 
     events.append(
@@ -163,11 +185,14 @@ def create_app(
         masked.pop("stream", None)
 
         if on_request is not None:
-            newly_masked = session.entries()[before:]
+            # 이번 요청에서 실제로 가려진 자리를 센다. 세션에 이미 등록된 값이라고
+            # 0건으로 보고하면 작동을 멈춘 것처럼 보인다 — 실제 왕복에서 겪은 문제다.
+            masked_here = count_masked(masked)
             on_request(
                 {
-                    "masked_count": len(newly_masked),
-                    "categories": [category for category, _ in newly_masked],
+                    "masked_count": len(masked_here),
+                    "categories": masked_here,
+                    "new_count": len(session) - before,
                     # 이미 가려진 본문이다. 기록이 새로운 유출 경로가 되어서는 안 된다.
                     "upstream_body": masked,
                 }

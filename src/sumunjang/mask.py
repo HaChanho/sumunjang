@@ -79,6 +79,15 @@ def mask(text: str, session: Session) -> str:
     return "".join(pieces)
 
 
+def placeholders_in(text: str) -> list[str]:
+    """텍스트에 있는 가명 표시의 카테고리 목록. 라벨을 카테고리 코드로 되돌린다."""
+    by_label = {label: category for category, label in _LABELS.items()}
+    return [
+        by_label[match.group()[1:].rsplit("_", 1)[0]]
+        for match in _PLACEHOLDER_PATTERN.finditer(text)
+    ]
+
+
 def restore(text: str, session: Session) -> str:
     """placeholder를 원문으로 되돌린다.
 
