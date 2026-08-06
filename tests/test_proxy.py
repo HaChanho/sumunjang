@@ -88,6 +88,43 @@ def test_개인정보가_없으면_본문이_그대로_전달된다():
     assert "안녕하세요" in user_saw["content"][0]["text"]
 
 
+def test_요청마다_무엇을_가렸는지_기록한다():
+    """사용자와 심사자가 직접 확인할 수 있는 물증. 기록에는 가려진 본문만 남는다."""
+    records: list[dict] = []
+
+    async def scenario():
+        upstream = UpstreamRecorder()
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=upstream), base_url="http://upstream"
+        ) as upstream_client:
+            app = create_app(
+                upstream_base_url="http://upstream",
+                client=upstream_client,
+                on_request=records.append,
+            )
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://proxy"
+            ) as proxy_client:
+                await proxy_client.post(
+                    "/v1/messages",
+                    json={
+                        "model": "claude-test",
+                        "messages": [
+                            {"role": "user", "content": "결제자 900101-1234568 연락처 010-1234-5678"}
+                        ],
+                    },
+                )
+
+    asyncio.run(scenario())
+
+    assert len(records) == 1
+    record = records[0]
+    assert record["masked_count"] == 2
+    assert sorted(record["categories"]) == ["PHONE", "RRN"]
+    # 기록에 남는 본문은 이미 가려진 것이어야 한다 — 로그가 새 유출 경로가 되면 안 된다
+    assert "900101-1234568" not in json.dumps(record["upstream_body"], ensure_ascii=False)
+
+
 async def _stream_roundtrip(request_body: dict) -> tuple[dict, str]:
     """스트리밍 요청을 왕복하고 (업스트림이 받은 것, 사용자가 받은 SSE 원문)."""
     upstream = UpstreamRecorder()

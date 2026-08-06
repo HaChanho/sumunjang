@@ -95,6 +95,30 @@ def test_API_키를_탐지한다():
     assert text[secrets[0].start : secrets[0].end].startswith("sk-ant-")
 
 
+def test_긴_숫자열_안의_일부를_주민등록번호로_오탐하지_않는다():
+    """견적번호 20260806-0012345 의 뒷부분이 주민번호 형태와 우연히 일치한다.
+
+    골든셋 채점에서 실제로 나온 오탐이다.
+    """
+    text = "견적 번호는 20260806-0012345 입니다"
+
+    findings = detect(text)
+
+    assert [f for f in findings if f.category == "RRN"] == []
+
+
+def test_접속_문자열의_호스트를_이메일로_오탐하지_않는다():
+    """postgresql://app:pw@10.0.3.14 의 일부가 이메일처럼 보인다.
+
+    이메일 최상위 도메인은 숫자일 수 없다는 조건으로 걸러낸다.
+    """
+    text = "DATABASE_URL=postgresql://app:pw@10.0.3.14:5432/prod"
+
+    findings = detect(text)
+
+    assert [f for f in findings if f.category == "EMAIL"] == []
+
+
 def test_전각_숫자로_쓴_주민등록번호도_탐지한다():
     """전각 숫자는 눈으로는 같아 보이지만 코드포인트가 달라 정규식을 빠져나간다."""
     text = "고객 ９００１０１-１２３４５６８ 확인"

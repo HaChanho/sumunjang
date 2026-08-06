@@ -49,6 +49,13 @@ class Session:
     def original_for(self, placeholder: str) -> str | None:
         return self._value_by_placeholder.get(placeholder)
 
+    def entries(self) -> list[tuple[str, str]]:
+        """가린 항목을 (카테고리, placeholder) 순서대로. 원문은 내보내지 않는다."""
+        return [
+            (category, self._placeholder_by_value[(category, value)])
+            for category, value in self._placeholder_by_value
+        ]
+
     def __len__(self) -> int:
         return len(self._value_by_placeholder)
 

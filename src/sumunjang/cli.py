@@ -34,6 +34,10 @@ def _build_parser() -> argparse.ArgumentParser:
     mask_cmd = sub.add_parser("mask", help="개인정보를 가명값으로 바꾼다")
     mask_cmd.add_argument("source", help="파일 경로 또는 - (표준 입력)")
 
+    report = sub.add_parser("report", help="골든셋으로 탐지 성능을 채점한다")
+    report.add_argument("directory", nargs="?", default="goldenset", help="골든셋 디렉토리")
+    report.add_argument("--json", action="store_true", help="JSON으로 출력")
+
     proxy = sub.add_parser("proxy", help="AI API 경계 게이트웨이를 띄운다")
     proxy.add_argument("--port", type=int, default=4000)
     proxy.add_argument("--host", default="127.0.0.1")
@@ -41,6 +45,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--upstream",
         default="https://api.anthropic.com",
         help="업스트림 API 주소",
+    )
+    proxy.add_argument(
+        "--dump",
+        metavar="파일",
+        help="업스트림으로 나간 본문을 기록한다 (이미 가려진 본문이므로 원문은 남지 않는다)",
     )
 
     return parser
@@ -91,17 +100,102 @@ def run(
         print(f"{len(session)}건 가림", file=stderr)
         return 0
 
+    if args.command == "report":
+        import json as json_module
+
+        from .goldenset import Span, load_directory, score
+
+        try:
+            documents = load_directory(args.directory)
+        except OSError as exc:
+            print(f"골든셋을 읽지 못했습니다: {exc}", file=stderr)
+            return 3
+
+        if not documents:
+            print(f"골든셋 문서가 없습니다: {args.directory}", file=stderr)
+            return 3
+
+        truth: list[Span] = []
+        found: list[Span] = []
+        for document in documents:
+            truth.extend(document.spans)
+            found.extend(
+                Span(f.category, f.start, f.end) for f in detect(document.text)
+            )
+
+        result = score(truth, found)
+        expected = sum(m["expected"] for m in result.values())
+        detected = sum(m["detected"] for m in result.values())
+        hit = sum(m["hit"] for m in result.values())
+
+        if args.json:
+            print(
+                json_module.dumps(
+                    {
+                        "documents": len(documents),
+                        "categories": result,
+                        "total": {"expected": expected, "detected": detected, "hit": hit},
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                file=stdout,
+            )
+            return 0
+
+        print(f"# 수문장 탐지 성능 자체 평가\n", file=stdout)
+        print(f"- 문서 {len(documents)}건, 정답 {expected}건", file=stdout)
+        print(f"- 재현 방법: `sumunjang report {args.directory}`\n", file=stdout)
+        print("| 카테고리 | 정답 | 탐지 | 적중 | 재현율 | 정밀도 |", file=stdout)
+        print("|---|---:|---:|---:|---:|---:|", file=stdout)
+        for category, metric in result.items():
+            print(
+                f"| {category} | {metric['expected']} | {metric['detected']} | "
+                f"{metric['hit']} | {metric['recall']:.3f} | {metric['precision']:.3f} |",
+                file=stdout,
+            )
+        if expected and detected:
+            print(
+                f"| **전체** | {expected} | {detected} | {hit} | "
+                f"{hit / expected:.3f} | {hit / detected:.3f} |",
+                file=stdout,
+            )
+
+        print(
+            "\n## 이 수치의 한계\n"
+            "- 골든셋은 개발자가 자체 제작한 합성 문서다. 도구를 만든 사람이 정답도 만들었으므로\n"
+            "  이 점수는 독립적인 성능 증명이 아니라 회귀를 감시하는 기준선이다.\n"
+            "- 규칙에 없는 표기·문맥 의존 개인정보(이름, 자유서술 주소)는 정답에 포함되지 않았다.\n"
+            "  현재 탐지 범위 자체의 한계이며 점수에 반영되지 않는다.",
+            file=stdout,
+        )
+        return 0
+
     if args.command == "proxy":
+        import json
+
         import uvicorn
 
         from .proxy import create_app
+
+        def report(record: dict) -> None:
+            summary = ", ".join(record["categories"]) if record["categories"] else "없음"
+            print(f"[수문장] 가린 항목 {record['masked_count']}건: {summary}", file=stderr, flush=True)
+            if args.dump:
+                with open(args.dump, "a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(record["upstream_body"], ensure_ascii=False) + "\n")
 
         print(
             f"수문장이 {args.host}:{args.port} 에서 문을 지킵니다.\n"
             f"  export ANTHROPIC_BASE_URL=http://{args.host}:{args.port}",
             file=stderr,
         )
-        uvicorn.run(create_app(upstream_base_url=args.upstream), host=args.host, port=args.port)
+        uvicorn.run(
+            create_app(upstream_base_url=args.upstream, on_request=report),
+            host=args.host,
+            port=args.port,
+            log_level="warning",
+        )
         return 0
 
     return 2

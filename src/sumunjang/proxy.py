@@ -120,10 +120,15 @@ async def _send_json(send, status: int, payload: Any) -> None:
     await send({"type": "http.response.body", "body": body})
 
 
-def create_app(upstream_base_url: str = ANTHROPIC_API, client: httpx.AsyncClient | None = None):
+def create_app(
+    upstream_base_url: str = ANTHROPIC_API,
+    client: httpx.AsyncClient | None = None,
+    on_request=None,
+):
     """게이트웨이 ASGI 앱을 만든다.
 
     client 를 주입하면 테스트에서 업스트림을 에코 서버로 바꿔 끼울 수 있다.
+    on_request 는 요청마다 무엇을 가렸는지 받아보는 콜백이다.
     """
     session = Session()
     owns_client = client is None
@@ -152,9 +157,21 @@ def create_app(upstream_base_url: str = ANTHROPIC_API, client: httpx.AsyncClient
             return
 
         wants_stream = bool(body.get("stream"))
+        before = len(session)
         masked = mask_request(body, session)
         # 업스트림에는 통짜로 요청한다. 복원을 끝낸 뒤 클라이언트에게만 스트리밍으로 보인다.
         masked.pop("stream", None)
+
+        if on_request is not None:
+            newly_masked = session.entries()[before:]
+            on_request(
+                {
+                    "masked_count": len(newly_masked),
+                    "categories": [category for category, _ in newly_masked],
+                    # 이미 가려진 본문이다. 기록이 새로운 유출 경로가 되어서는 안 된다.
+                    "upstream_body": masked,
+                }
+            )
 
         headers = {
             key.decode(): value.decode()

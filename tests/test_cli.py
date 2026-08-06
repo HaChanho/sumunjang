@@ -31,3 +31,18 @@ def test_mask는_마스킹된_텍스트를_출력한다():
     assert code == 0
     assert out.strip() == "결제자 [주민등록번호_1]"
     assert "900101" not in out
+
+
+def test_report는_채점표와_한계를_함께_낸다(tmp_path):
+    """수치만 내놓으면 자체 채점을 객관 지표처럼 읽게 된다. 한계를 같이 적는다."""
+    (tmp_path / "doc.txt").write_text(
+        "domain: 테스트\n---\n연락처 {{PHONE:010-1234-5678}}",
+        encoding="utf-8",
+    )
+
+    code, out, _ = _run(["report", str(tmp_path)])
+
+    assert code == 0
+    assert "PHONE" in out
+    assert "재현율" in out
+    assert "자체 제작" in out

@@ -1,0 +1,12 @@
+domain: 장애로그
+---
+[2026-08-06 14:22:31] ERROR payment-api - 결제 승인 실패
+  trace_id=8f3a2c91-4e5b-11ef-9c2d-0242ac120002
+  user_rrn={{RRN:850312-1000003}}
+  phone={{PHONE:010-9921-3348}}
+  card={{CARD:5530-1234-5678-0004}}
+  amount=89000 currency=KRW
+  upstream=192.168.10.24:8080 latency_ms=3120
+  order_no=1234-5678-9012-3456
+[2026-08-06 14:22:33] WARN payment-api - 재시도 1회차
+[2026-08-06 14:22:35] INFO payment-api - 대체 PG 라우팅 (KCP)

@@ -1,0 +1,16 @@
+domain: 개발자설정
+---
+# 배포 환경 변수 (개발자가 AI에게 디버깅을 요청하며 통째로 붙여넣는 상황)
+
+DATABASE_URL=postgresql://app:pw@10.0.3.14:5432/prod
+ANTHROPIC_API_KEY={{SECRET:sk-ant-api03-Zm9vYmFyMTIzNDU2Nzg5MGFiY2RlZg}}
+AWS_ACCESS_KEY_ID={{SECRET:AKIAIOSFODNN7EXAMPLE}}
+GITHUB_TOKEN={{SECRET:ghp_1234567890abcdefghijklmnopqrstuvwxyz}}
+
+# 운영 담당자 비상 연락망
+ONCALL_PRIMARY={{PHONE:010-7788-1122}}
+ONCALL_EMAIL={{EMAIL:oncall@daehan-tech.co.kr}}
+
+# 참고: 아래는 키가 아니라 커밋 해시입니다
+LAST_DEPLOY_COMMIT=8f3a2c914e5b11ef9c2d0242ac120002
+BUILD_NUMBER=2026080601

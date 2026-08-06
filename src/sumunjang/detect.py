@@ -12,18 +12,23 @@ from dataclasses import dataclass
 # 앞 12자리 × 가중치의 합을 11로 나눈 나머지로 13번째 자리를 결정한다.
 _RRN_WEIGHTS = (2, 3, 4, 5, 6, 7, 8, 9, 2, 3, 4, 5)
 
-_RRN_PATTERN = re.compile(r"\d{6}-\d{7}")
+# 숫자 식별자에는 모두 경계 조건을 붙인다. 앞뒤에 숫자가 붙어 있으면 더 긴 번호의
+# 일부일 뿐이다 — 견적번호 20260806-0012345 의 뒷부분이 주민번호 형태와 우연히
+# 일치하는 사례를 골든셋 채점에서 실제로 만났다.
+_RRN_PATTERN = re.compile(r"(?<!\d)\d{6}-\d{7}(?!\d)")
 
 # 휴대전화: 010/011/016/017/018/019 + 3~4자리 + 4자리, 구분자는 하이픈/공백/없음
-_PHONE_PATTERN = re.compile(r"01[016789][-\s]?\d{3,4}[-\s]?\d{4}")
+_PHONE_PATTERN = re.compile(r"(?<!\d)01[016789][-\s]?\d{3,4}[-\s]?\d{4}(?!\d)")
 
-_EMAIL_PATTERN = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+# 이메일. 최상위 도메인이 숫자면 이메일이 아니다 —
+# postgresql://app:pw@10.0.3.14 같은 접속 문자열을 걸러내기 위한 조건이다.
+_EMAIL_PATTERN = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)*\.[A-Za-z]{2,}")
 
 # 카드번호: 4자리 4묶음
-_CARD_PATTERN = re.compile(r"\d{4}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}")
+_CARD_PATTERN = re.compile(r"(?<!\d)\d{4}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}(?!\d)")
 
 # 사업자등록번호: 3-2-5 형식
-_BRN_PATTERN = re.compile(r"\d{3}-\d{2}-\d{5}")
+_BRN_PATTERN = re.compile(r"(?<!\d)\d{3}-\d{2}-\d{5}(?!\d)")
 _BRN_WEIGHTS = (1, 3, 7, 1, 3, 7, 1, 3, 5)
 
 # API 키·토큰. 개발자가 코드나 설정을 붙여넣을 때 함께 새어나가는 경로다.
