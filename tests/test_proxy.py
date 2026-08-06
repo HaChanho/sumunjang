@@ -86,3 +86,43 @@ def test_개인정보가_없으면_본문이_그대로_전달된다():
 
     assert upstream_seen["messages"][0]["content"] == "안녕하세요"
     assert "안녕하세요" in user_saw["content"][0]["text"]
+
+
+async def _stream_roundtrip(request_body: dict) -> tuple[dict, str]:
+    """스트리밍 요청을 왕복하고 (업스트림이 받은 것, 사용자가 받은 SSE 원문)."""
+    upstream = UpstreamRecorder()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=upstream), base_url="http://upstream"
+    ) as upstream_client:
+        app = create_app(upstream_base_url="http://upstream", client=upstream_client)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://proxy"
+        ) as proxy_client:
+            response = await proxy_client.post("/v1/messages", json=request_body)
+
+    return upstream.received, response.text
+
+
+def test_스트리밍_요청은_복원된_내용을_SSE로_돌려준다():
+    """Claude Code는 스트리밍으로 호출한다.
+
+    조각난 응답에서 placeholder를 정확히 복원하는 것은 신뢰하기 어려우므로,
+    업스트림에는 통짜로 요청해 복원한 뒤 SSE 형태로 다시 흘려보낸다.
+    """
+    body = {
+        "model": "claude-test",
+        "stream": True,
+        "messages": [{"role": "user", "content": "결제자 900101-1234568 조회"}],
+    }
+
+    upstream_seen, sse_text = asyncio.run(_stream_roundtrip(body))
+
+    # 업스트림에는 스트리밍을 요청하지 않는다
+    assert upstream_seen.get("stream") is not True
+    assert "900101-1234568" not in json.dumps(upstream_seen, ensure_ascii=False)
+
+    # 사용자에게는 SSE 이벤트로, 원문이 복원된 채 도착한다
+    assert "event: message_start" in sse_text
+    assert "event: content_block_delta" in sse_text
+    assert "event: message_stop" in sse_text
+    assert "900101-1234568" in sse_text

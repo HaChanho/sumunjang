@@ -31,6 +31,80 @@ async def _read_body(receive) -> bytes:
     return b"".join(chunks)
 
 
+def _as_sse_events(message: dict) -> list[tuple[str, dict]]:
+    """완성된 응답을 Anthropic SSE 이벤트 열로 펼친다.
+
+    조각난 스트림에서 placeholder를 복원하는 것은 신뢰하기 어렵다. placeholder가
+    청크 경계에서 잘리거나 모델이 형태를 바꾸면 복원이 깨진다. 그래서 업스트림에는
+    통짜로 요청해 복원을 끝낸 뒤, 클라이언트에게만 스트리밍처럼 보이게 다시 흘린다.
+    """
+    blocks = message.get("content", [])
+    events: list[tuple[str, dict]] = [
+        (
+            "message_start",
+            {"type": "message_start", "message": {**message, "content": []}},
+        )
+    ]
+
+    for index, block in enumerate(blocks):
+        events.append(
+            (
+                "content_block_start",
+                {
+                    "type": "content_block_start",
+                    "index": index,
+                    "content_block": {**block, "text": ""} if block.get("type") == "text" else block,
+                },
+            )
+        )
+        if block.get("type") == "text":
+            events.append(
+                (
+                    "content_block_delta",
+                    {
+                        "type": "content_block_delta",
+                        "index": index,
+                        "delta": {"type": "text_delta", "text": block.get("text", "")},
+                    },
+                )
+            )
+        events.append(("content_block_stop", {"type": "content_block_stop", "index": index}))
+
+    events.append(
+        (
+            "message_delta",
+            {
+                "type": "message_delta",
+                "delta": {
+                    "stop_reason": message.get("stop_reason"),
+                    "stop_sequence": message.get("stop_sequence"),
+                },
+                "usage": message.get("usage", {}),
+            },
+        )
+    )
+    events.append(("message_stop", {"type": "message_stop"}))
+    return events
+
+
+async def _send_sse(send, message: dict) -> None:
+    payload = b"".join(
+        f"event: {name}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n".encode()
+        for name, data in _as_sse_events(message)
+    )
+    await send(
+        {
+            "type": "http.response.start",
+            "status": 200,
+            "headers": [
+                (b"content-type", b"text/event-stream"),
+                (b"cache-control", b"no-cache"),
+            ],
+        }
+    )
+    await send({"type": "http.response.body", "body": payload})
+
+
 async def _send_json(send, status: int, payload: Any) -> None:
     body = json.dumps(payload, ensure_ascii=False).encode()
     await send(
@@ -77,7 +151,10 @@ def create_app(upstream_base_url: str = ANTHROPIC_API, client: httpx.AsyncClient
             )
             return
 
+        wants_stream = bool(body.get("stream"))
         masked = mask_request(body, session)
+        # 업스트림에는 통짜로 요청한다. 복원을 끝낸 뒤 클라이언트에게만 스트리밍으로 보인다.
+        masked.pop("stream", None)
 
         headers = {
             key.decode(): value.decode()
@@ -119,6 +196,12 @@ def create_app(upstream_base_url: str = ANTHROPIC_API, client: httpx.AsyncClient
             await send({"type": "http.response.body", "body": upstream.content})
             return
 
-        await _send_json(send, upstream.status_code, restore_response(payload, session))
+        restored = restore_response(payload, session)
+
+        if wants_stream and upstream.status_code == 200:
+            await _send_sse(send, restored)
+            return
+
+        await _send_json(send, upstream.status_code, restored)
 
     return app
