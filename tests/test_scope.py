@@ -115,15 +115,40 @@ def test_사전의_키도_가린다():
     assert 원문 not in _나간본문(anthropic_mask, body)
 
 
-def test_도구_호출을_잇는_토큰은_가리지_않는다():
-    """프로토콜이 만들고 사람이 쓰지 않는 자리다. 훼손되면 짝이 어긋난다."""
-    아이디 = "toolu_9001011234568"
-    body = {"messages": [{"role": "user", "content": [
-        {"type": "tool_result", "tool_use_id": 아이디, "content": "결과"}]}]}
+def test_식별자에_개인정보가_들어_있으면_가리되_짝은_유지한다():
+    """한때 식별자를 예외로 뒀다. 예외 칸 자체가 문제를 둘 만들었다.
+
+    우회 통로가 됐고(식별자에 개인정보를 넣으면 그대로 나간다), id 는 가리고
+    tool_use_id 는 안 가려 오히려 짝이 어긋났다. 전부 가리면 같은 값은 같은
+    가명을 받으므로 짝이 맞고 통로도 사라진다.
+    """
+    아이디 = f"toolu_{원문}"
+    body = {"messages": [
+        {"role": "assistant", "content": [
+            {"type": "tool_use", "id": 아이디, "name": "Read", "input": {}}]},
+        {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": 아이디, "content": "결과"}]},
+    ]}
 
     나간것 = anthropic_mask(body, Session())
 
-    assert 나간것["messages"][0]["content"][0]["tool_use_id"] == 아이디
+    호출 = 나간것["messages"][0]["content"][0]["id"]
+    결과 = 나간것["messages"][1]["content"][0]["tool_use_id"]
+    assert 원문 not in 호출
+    assert 호출 == 결과, "짝이 어긋나면 업스트림이 요청을 거부한다"
+
+
+def test_평문_data_URI_안의_개인정보도_가린다():
+    """data: 가 언제나 base64 인 것은 아니다.
+
+    data:image/svg+xml,<svg>...</svg> 는 평문이고 그 안에 글자가 들어간다.
+    `;base64,` 가 붙은 것만 알맹이로 보고 건너뛴다.
+    """
+    평문 = f"data:image/svg+xml,<svg><text>{원문}</text></svg>"
+    body = {"messages": [{"role": "user", "content": [
+        {"type": "image_url", "image_url": {"url": 평문}}]}]}
+
+    assert 원문 not in _나간본문(openai_mask, body)
 
 
 def test_구조를_가리키는_값은_손상되지_않는다():

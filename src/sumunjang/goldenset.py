@@ -13,7 +13,13 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-_MARKER = re.compile(r"\{\{([A-Z_]+):(.*?)\}\}", re.S)
+# 값 부분에 중괄호를 허용하지 않는다. `.*?` 로 두면 닫는 마커가 없는 입력에서
+# 시작 위치마다 끝까지 훑어 파일 길이의 제곱으로 커진다.
+_MARKER = re.compile(r"\{\{([A-Z_]+):([^{}]*)\}\}")
+
+# 열렸지만 위 패턴으로 닫히지 않은 마커. 오타를 조용히 넘기면 정답이 소리 없이
+# 사라져 채점이 실제보다 좋아 보인다.
+_OPEN_MARKER = re.compile(r"\{\{")
 
 
 @dataclass(frozen=True)
@@ -42,6 +48,12 @@ class Document:
 
 def parse_annotated(annotated: str, doc_id: str = "", domain: str = "") -> Document:
     """마커가 들어간 원문을 평문 텍스트와 정답 스팬으로 푼다."""
+    if len(_OPEN_MARKER.findall(annotated)) != len(_MARKER.findall(annotated)):
+        raise ValueError(
+            f"{doc_id or '문서'}: 닫히지 않았거나 형식이 틀린 마커가 있습니다. "
+            "정답이 조용히 사라지면 채점이 실제보다 좋아 보입니다."
+        )
+
     pieces: list[str] = []
     spans: list[Span] = []
     cursor = 0

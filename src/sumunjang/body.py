@@ -22,24 +22,21 @@ from typing import Any
 
 from .mask import Session, mask
 
-# 마스킹에서 제외하는 자리. 기준은 하나다 — **사람이 쓸 수 없는 자리이면서,
-# 훼손되면 요청 자체가 깨지는 값.** 그 밖의 모든 문자열은 가린다.
+# 마스킹에서 제외하는 자리. 딱 둘이다.
 #
-#   signature      추론 블록의 서명. 한 글자만 바뀌어도 다음 턴이 400 이 된다.
-#   tool_use_id    도구 호출과 결과를 잇는 토큰. 프로토콜이 만들며 사람이 쓰지 않는다.
-#   tool_call_id   같음(OpenAI 쪽 이름).
-#   data           base64 첨부의 알맹이. 형제 필드 type 이 base64 일 때만 건너뛴다 —
-#                  type 이 text 인 document 블록의 data 는 사람이 쓴 글이므로 가린다.
+#   signature   추론 블록의 서명. 사람이 쓸 수 없고, 한 글자만 바뀌어도 다음 턴이 400 이 된다.
+#   data        base64 로 실린 첨부의 알맹이. 형제 필드 type 이 base64 이거나 data: URI 가
+#               `;base64,` 를 달고 있을 때만이다. data: 가 언제나 base64 인 것은 아니다 —
+#               `data:image/svg+xml,<svg>...</svg>` 는 평문이고, 그 안에 개인정보가 들어간다.
 #
-# 한때 url 과 id 도 여기 있었다. "가리면 첨부가 깨진다" 는 이유였는데 그것이 틀렸다.
-# **깨지는 것은 눈에 보이고 유출은 보이지 않는다.** 주소 안의 개인정보는 업스트림이
-# 그 주소를 가져가는 순간 그대로 넘어가므로, 가려서 요청이 실패하는 편이 안전한
-# 실패다. id 는 metadata.id 처럼 사람이 채우는 자리에도 쓰이는 흔한 이름이라
-# 통째로 빼면 구멍이 된다. 같은 값은 같은 가명을 받으므로 짝은 어긋나지 않는다.
-_OPAQUE_KEYS = frozenset({"signature", "tool_use_id", "tool_call_id"})
-
-# data: URI 는 주소가 아니라 알맹이를 담은 덩어리다. 가리면 첨부가 훼손된다.
-_DATA_URI = "data:"
+# 한때 url·id·tool_use_id·tool_call_id 도 여기 있었다. 이유는 "가리면 짝이 어긋나거나
+# 첨부가 깨진다" 였는데, 예외 칸 자체가 두 가지를 만들었다. 우회 통로가 되고(식별자에
+# 개인정보를 넣으면 그대로 나간다), id 는 가리고 tool_use_id 는 안 가려 오히려 짝이
+# 어긋났다. 전부 가리면 같은 값은 같은 가명을 받으므로 짝이 맞고 통로도 사라진다.
+#
+# 식별자에 개인정보가 들어 있어 업스트림이 거부한다면 그것은 **눈에 보이는 실패**다.
+# 유출은 보이지 않는다.
+_OPAQUE_KEYS = frozenset({"signature"})
 
 
 def _is_opaque(key: str, value: str, parent: dict) -> bool:
@@ -47,8 +44,7 @@ def _is_opaque(key: str, value: str, parent: dict) -> bool:
         return True
     if key == "data" and parent.get("type") == "base64":
         return True
-    # https:// 주소는 가린다. data: URI 만 예외다.
-    return key == "url" and value.startswith(_DATA_URI)
+    return value.startswith("data:") and ";base64," in value[:64]
 
 
 def mask_everything(node: Any, session: Session, parent: dict | None = None, key: str = "") -> Any:

@@ -16,7 +16,7 @@ from typing import Any, Callable
 import httpx
 
 from .anthropic import count_masked, mask_request, restore_response
-from .mask import Session, SessionFull
+from .mask import Session, SessionFull, mask
 from .openai import count_masked as openai_count_masked
 from .openai import mask_request as openai_mask_request
 from .openai import restore_response as openai_restore_response
@@ -319,9 +319,18 @@ def create_app(
         }
 
         if method == "GET" and (path == _PASSTHROUGH_EXACT or path.startswith(_PASSTHROUGH_PREFIX)):
+            # 본문이 없다는 것이 경로·쿼리에 개인정보가 없다는 뜻은 아니다.
+            # /v1/models/900101-1234568?email=... 은 그대로 나갈 수 있다.
+            passthrough_session = session_for(headers)
             query = scope.get("query_string", b"").decode()
             await _passthrough(
-                send, client, owns_client, upstream_base_url, path, headers, query
+                send,
+                client,
+                owns_client,
+                upstream_base_url,
+                mask(path, passthrough_session),
+                headers,
+                mask(query, passthrough_session),
             )
             return
 

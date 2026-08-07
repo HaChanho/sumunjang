@@ -44,7 +44,12 @@ jobs:
         run: uv run pytest -q --cov=sumunjang --cov-report=term-missing
 
       - name: 골든셋 채점 (README 수치가 재현되는지)
-        run: uv run sumunjang report
+        # 점수를 찍기만 하면 회귀를 아무도 못 본다. README 에 적은 값이 계약이므로
+        # 그 아래로 내려가면 실패시킨다. gaps 셋은 낮은 것이 정상이라 제외한다.
+        run: |
+          uv run sumunjang report \
+            --only goldenset --only goldenset-hard \
+            --min-recall 1.0 --min-precision 1.0
 
   package:
     name: 패키지 (설치본이 저장소 없이 동작하는가)

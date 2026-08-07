@@ -64,6 +64,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
     scan = sub.add_parser("scan", help="개인정보를 찾기만 한다 (CI 게이트용)")
     scan.add_argument("source", help="파일 경로 또는 - (표준 입력)")
+    scan.add_argument(
+        "--show-values",
+        action="store_true",
+        help="찾은 값을 그대로 출력한다 (기본은 카테고리·좌표만)",
+    )
 
     mask_cmd = sub.add_parser("mask", help="개인정보를 가명값으로 바꾼다")
     mask_cmd.add_argument("source", help="파일 경로 또는 - (표준 입력)")
@@ -76,6 +81,24 @@ def _build_parser() -> argparse.ArgumentParser:
         help=f"골든셋 디렉토리 (기본: {' '.join(DEFAULT_GOLDENSETS)})",
     )
     report.add_argument("--json", action="store_true", help="JSON으로 출력")
+    report.add_argument(
+        "--min-recall",
+        type=float,
+        metavar="비율",
+        help="셋별 재현율이 이 값 아래로 내려가면 종료 코드 1 (CI 회귀 게이트)",
+    )
+    report.add_argument(
+        "--min-precision",
+        type=float,
+        metavar="비율",
+        help="셋별 정밀도가 이 값 아래로 내려가면 종료 코드 1",
+    )
+    report.add_argument(
+        "--only",
+        metavar="이름",
+        action="append",
+        help="임계값을 적용할 셋 이름 (여러 번 지정 가능). 생략하면 전부",
+    )
 
     proxy = sub.add_parser("proxy", help="AI API 경계 게이트웨이를 띄운다")
     proxy.add_argument("--port", type=int, default=4000)
@@ -202,7 +225,36 @@ def _report(args, stdout: IO[str], stderr: IO[str]) -> int:
     for directory, count, result in scored:
         _print_table(directory, count, result, stdout)
     print(_LIMITS, file=stdout)
-    return 0
+
+    return _check_thresholds(args, scored, stderr)
+
+
+def _check_thresholds(args, scored, stderr: IO[str]) -> int:
+    """공표한 수치 아래로 내려가면 실패한다.
+
+    점수를 찍기만 하면 회귀를 아무도 못 본다. README 에 적은 값이 곧 계약이므로
+    CI 가 그 계약을 지키는지 확인해야 한다. gaps 셋은 낮은 것이 정상이라 --only
+    로 대상을 고른다.
+    """
+    if args.min_recall is None and args.min_precision is None:
+        return 0
+
+    실패 = []
+    for directory, _, result in scored:
+        이름 = Path(directory).name
+        if args.only and 이름 not in args.only:
+            continue
+        expected, detected, hit = _totals(result)
+        재현율 = hit / expected if expected else 0.0
+        정밀도 = hit / detected if detected else 0.0
+        if args.min_recall is not None and 재현율 < args.min_recall:
+            실패.append(f"{이름}: 재현율 {재현율:.3f} < {args.min_recall:.3f}")
+        if args.min_precision is not None and 정밀도 < args.min_precision:
+            실패.append(f"{이름}: 정밀도 {정밀도:.3f} < {args.min_precision:.3f}")
+
+    for 줄 in 실패:
+        print(f"기준 미달: {줄}", file=stderr)
+    return 1 if 실패 else 0
 
 
 def run(
@@ -230,11 +282,11 @@ def run(
 
         findings = detect(text)
         for finding in findings:
-            print(
-                f"{finding.category}\t{finding.start}-{finding.end}\t"
-                f"{text[finding.start : finding.end]}",
-                file=stdout,
-            )
+            # 기본은 카테고리와 좌표만 낸다. scan 은 CI 게이트로 쓰이는데,
+            # 찾은 값을 그대로 찍으면 개인정보가 빌드 로그에 영구히 남는다.
+            # 개인정보를 막겠다는 도구가 새 유출 경로를 만드는 셈이다.
+            값 = f"\t{text[finding.start : finding.end]}" if args.show_values else ""
+            print(f"{finding.category}\t{finding.start}-{finding.end}{값}", file=stdout)
         print(f"총 {len(findings)}건", file=stderr)
         return 1 if findings else 0
 

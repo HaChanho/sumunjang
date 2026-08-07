@@ -19,6 +19,19 @@ def test_scan은_개인정보를_찾으면_1로_끝난다():
     assert "PHONE" in out
 
 
+def test_scan은_기본적으로_찾은_값을_출력하지_않는다():
+    """scan 은 CI 게이트로 쓰인다. 찾은 값을 찍으면 개인정보가 빌드 로그에
+    영구히 남는다 — 개인정보를 막겠다는 도구가 새 유출 경로를 만드는 셈이다."""
+    code, out, _ = _run(["scan", "-"], "연락처 010-1234-5678")
+
+    assert code == 1
+    assert "PHONE" in out
+    assert "010-1234-5678" not in out
+
+    _, 값보임, _ = _run(["scan", "-", "--show-values"], "연락처 010-1234-5678")
+    assert "010-1234-5678" in 값보임
+
+
 def test_scan은_개인정보가_없으면_0으로_끝난다():
     code, _, _ = _run(["scan", "-"], "특이사항 없음")
 
