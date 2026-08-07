@@ -28,6 +28,10 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
+          # 캐시 키를 uv.lock 에 묶는다. 이것이 없으면 캐시가 영영 무효화되지
+          # 않아, 의존성을 올려도 옛 버전으로 테스트하게 된다. 빠른 CI 가 아니라
+          # 거짓 초록불이 된다.
+          cache-dependency-glob: "uv.lock"
 
       - name: 의존성 설치
         run: uv venv && uv pip install -e ".[dev]"
