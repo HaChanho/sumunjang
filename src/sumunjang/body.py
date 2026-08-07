@@ -22,13 +22,21 @@ from typing import Any
 
 from .mask import Session, mask
 
-# 마스킹에서 제외하는 자리. 사람이 쓴 텍스트가 아니라 **훼손되면 요청 자체가
-# 거부되는 불투명한 덩어리**다. 예외는 여기까지이며 그 밖의 모든 문자열은 가린다.
+# 마스킹에서 제외하는 자리. 기준은 하나다 — **사람이 쓴 텍스트가 아니면서,
+# 훼손되면 요청 자체가 깨지는 값.** 그 밖의 모든 문자열은 가린다.
 #
-#   signature   추론(thinking) 블록의 서명. 한 글자만 바뀌어도 다음 턴이 400 이 된다.
-#   data        base64 첨부의 알맹이. 형제 필드 type 이 base64 일 때만 건너뛴다 —
-#               type 이 text 인 document 블록의 data 는 사람이 쓴 글이므로 가린다.
-_OPAQUE_KEYS = frozenset({"signature"})
+#   signature                     추론 블록의 서명. 한 글자만 바뀌어도 다음 턴이 400 이 된다.
+#   id, tool_use_id, tool_call_id 프로토콜이 만든 불투명 토큰. 여기서의 패턴 일치는
+#                                 정의상 오탐이고, 가리면 짝이 어긋나 요청이 거부된다.
+#   url                           가려진 주소는 해석되지 않아 첨부가 깨진다. data: URI
+#                                 형태로 base64 덩어리가 실리기도 한다.
+#   data                          base64 첨부의 알맹이. 형제 필드 type 이 base64 일 때만
+#                                 건너뛴다 — type 이 text 인 document 블록의 data 는
+#                                 사람이 쓴 글이므로 가린다.
+#
+# url 을 빼는 것은 대가가 있다. 주소 안에 개인정보가 들어 있으면 그대로 나간다.
+# 다만 그것은 드물고, 첨부가 깨지는 것은 확실하다. README 한계에 적어 둔다.
+_OPAQUE_KEYS = frozenset({"signature", "id", "tool_use_id", "tool_call_id", "url"})
 
 
 def _is_opaque(key: str, parent: dict) -> bool:

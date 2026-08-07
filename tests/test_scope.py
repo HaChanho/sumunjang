@@ -84,6 +84,27 @@ def test_훼손되면_요청이_깨지는_자리는_건드리지_않는다():
     assert 나간것["messages"][1]["content"][0]["source"]["data"] == base64덩어리
 
 
+def test_짝이_어긋나면_요청이_깨지는_식별자는_가리지_않는다():
+    """프로토콜이 만든 불투명 토큰에서의 패턴 일치는 정의상 오탐이다.
+
+    tool_use_id 안의 숫자열이 우연히 주민등록번호 검증식을 통과하면, 가리는 순간
+    tool_use 와 tool_result 의 짝이 어긋나 업스트림이 요청을 거부한다.
+    이득은 0이고 손해는 확실하다. url 도 같다 — 가려진 주소는 해석되지 않는다.
+    """
+    아이디 = "toolu_9001011234568"
+    주소 = "https://cdn.example.com/a@b.co/x.png"
+    body = {"messages": [{"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": 아이디, "content": "결과"},
+        {"type": "image", "source": {"type": "url", "url": 주소}},
+    ]}]}
+
+    나간것 = anthropic_mask(body, Session())
+
+    블록 = 나간것["messages"][0]["content"]
+    assert 블록[0]["tool_use_id"] == 아이디
+    assert 블록[1]["source"]["url"] == 주소
+
+
 def test_구조를_가리키는_값은_손상되지_않는다():
     """모델명·역할·식별자는 마스킹해도 무해하다 — 개인정보처럼 생기지 않았으므로
     탐지기가 반응하지 않는다. 그래도 그대로인지 확인해 둔다."""
