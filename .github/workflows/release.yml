@@ -1,0 +1,88 @@
+name: Release
+
+# PyPI Trusted Publisher(OIDC)로 게시한다. 저장된 토큰이 없다.
+#
+# GitHub 이 실행마다 단기 신원 증명을 만들고, PyPI 가 "이 저장소의 이 워크플로가
+# 맞다"를 확인해 게시를 허락한다. 훔칠 장기 비밀값이 존재하지 않는 것이 요점이다.
+# 보안 도구가 자기 배포 경로에 장기 토큰을 두는 구성은 그 자체로 설명하기 어렵다.
+#
+# 주의: PyPI 에 등록할 때 **이 파일의 이름(release.yml)** 이 신원의 일부가 된다.
+# 파일을 옮기거나 이름을 바꾸면 게시가 거부되므로 그대로 둔다.
+# 태그로만 돈다. 수동 실행(workflow_dispatch)을 열어 두지 않는 것은 의도다 —
+# 게시는 되돌릴 수 없는데, 수동 실행은 임의 브랜치의 임의 상태를 올릴 수 있다.
+# 게시 경로는 불변이고 검토된 참조(태그)에서만 닿을 수 있어야 한다.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: 빌드·검증
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: 태그와 pyproject 버전이 일치하는가
+        # v0.2.0 태그를 달아 놓고 pyproject 는 0.1.0 인 채로 올리면, PyPI 는
+        # 0.1.0 이 이미 있다며 거부하거나(운이 좋은 경우) 엉뚱한 버전이 나간다.
+        # 되돌릴 수 없는 동작 앞에서는 사람이 아니라 기계가 확인해야 한다.
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version=$(grep -m1 '^version = ' pyproject.toml | cut -d'"' -f2)
+          if [ "$TAG" != "v$version" ]; then
+            echo "::error::태그($TAG)와 pyproject 버전($version)이 어긋납니다"
+            exit 1
+          fi
+          echo "버전 $version 확인"
+
+      - name: 테스트
+        env:
+          ANTHROPIC_API_KEY: ""
+        run: uv venv && uv pip install -e ".[dev]" && uv run pytest -q
+
+      - name: 빌드
+        run: uv build
+
+      - name: 저장소 밖에서 설치·실행
+        # 게시는 되돌릴 수 없다. PyPI 는 같은 버전의 재업로드를 허용하지 않으므로,
+        # 깨진 배포물을 올리면 버전을 태워야 한다. 올리기 전에 마지막으로 시험한다.
+        run: |
+          mkdir -p /tmp/clean && cd /tmp/clean
+          uv venv
+          uv pip install --python .venv/bin/python "$GITHUB_WORKSPACE"/dist/*.whl
+          echo "고객 900101-1234568 / 성명: 최윤서" | .venv/bin/sumunjang mask -
+          .venv/bin/sumunjang report
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: PyPI 게시
+    needs: build
+    runs-on: ubuntu-latest
+    # 환경을 따로 두면 PyPI 등록 시 환경 이름까지 신원에 포함시킬 수 있고,
+    # GitHub 쪽에서 승인 게이트를 걸어둘 수도 있다.
+    environment:
+      name: pypi
+      url: https://pypi.org/project/sumunjang/
+    permissions:
+      # OIDC 증명을 발급받기 위해 필요하다. 이 한 줄이 토큰을 대신한다.
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
