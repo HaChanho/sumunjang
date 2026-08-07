@@ -57,8 +57,9 @@ _BRN_WEIGHTS = (1, 3, 7, 1, 3, 7, 1, 3, 5)
 # API 키·토큰. 개발자가 코드나 설정을 붙여넣을 때 함께 새어나가는 경로다.
 # 각 제공자가 공표한 접두사만 사용한다 — 접두사 없는 임의 문자열까지 잡으려 하면
 # 오탐이 폭증한다.
+# 여기서도 \b 대신 영숫자 경계를 쓴다 — 한글이 \w 라서 "키sk-ant-…" 가 새어나간다.
 _SECRET_PATTERN = re.compile(
-    r"\b(?:"
+    r"(?<![A-Za-z0-9])(?:"
     r"sk-ant-[A-Za-z0-9_-]{16,}"      # Anthropic
     r"|sk-[A-Za-z0-9_-]{20,}"          # OpenAI
     r"|gh[pousr]_[A-Za-z0-9]{36,}"     # GitHub
@@ -120,7 +121,11 @@ _ACCOUNT_BARE = r"(?<!\d)\d{10,16}(?!\d)"
 
 # 여권번호: 영문 1자 + 숫자 8자(구형), 2021년부터 가운데 영문자가 한 자 늘었다
 # (M12345678 → M123A4567).
-_PASSPORT_VALUE = r"\b[A-Z](?:\d{3}[A-Z]\d{4}|\d{8})\b"
+#
+# 경계에 \b 를 쓰면 안 된다. 파이썬 정규식에서 한글은 \w 이므로 "M123A4567입니다"
+# 처럼 한글이 바로 붙으면 경계가 성립하지 않아 통째로 미탐지된다 — 한국어 문서에서
+# 가장 흔한 형태다. 영숫자만 경계로 본다.
+_PASSPORT_VALUE = r"(?<![A-Za-z0-9])[A-Z](?:\d{3}[A-Z]\d{4}|\d{8})(?![A-Za-z0-9])"
 
 # 운전면허번호: 지역코드(2)-연도(2)-일련번호(6)-검사번호(2). 2024년 말부터
 # 지역명 표기가 사라져 전부 숫자다. 10자리 구형 표기도 함께 받는다.
@@ -173,13 +178,21 @@ _INVISIBLE_EXTRA = frozenset(
 
 
 def _invisible(char: str) -> bool:
-    if char in _INVISIBLE_EXTRA:
-        return True
-    # Cf 서식 제어, Mn 폭 0 결합, Me 감싸는 결합. 셋 다 스스로는 자리를 차지하지
-    # 않는다. Me 를 빠뜨렸다가 U+20E3 을 끼운 주민등록번호를 통째로 놓쳤다.
-    return unicodedata.category(char) in ("Cf", "Me") or (
-        unicodedata.category(char) == "Mn" and unicodedata.combining(char) == 0
-    )
+    """스스로는 자리를 차지하지 않는 문자인가.
+
+    Cf(서식 제어), Mn(폭 0 결합), Me(감싸는 결합) 전부를 걷어낸다.
+
+    한때 Mn 중 결합 클래스가 0 이 아닌 것은 남겨 두고 NFC 에 맡겼다. 숫자에는
+    결합형이 없어 그 방식으로도 걸러졌기 때문이다. 그런데 **라틴 글자에는
+    결합형이 있다** — `sk-ant-…` 에 U+0301 을 얹으면 NFC 가 `sḱ` 로 합쳐 버려
+    접두사 매칭이 깨지고 API 키가 통째로 빠져나갔다. 같은 공격이 카테고리에
+    따라 다르게 작동한 것이라, 한쪽을 고쳤다고 닫힌 것이 아니었다.
+
+    결합 기호는 어차피 스스로 자리를 차지하지 않는다. 합쳐지든 안 합쳐지든
+    걷어내면 이 부류가 통째로 닫힌다. 대가는 `é` 를 `e` 로 읽는 것인데, 한국
+    개인정보 탐지에서 그것이 문제가 되는 자리는 없다.
+    """
+    return char in _INVISIBLE_EXTRA or unicodedata.category(char) in ("Cf", "Mn", "Me")
 
 
 # 한글 자모 중 앞 글자에 붙어 한 음절을 이루는 것들. 중성(V)과 종성(T)이다.
@@ -191,8 +204,10 @@ _JAMO_FINAL = range(0x11A8, 0x11C3)
 
 
 def _joins_previous(char: str) -> bool:
-    if unicodedata.combining(char) != 0:
-        return True
+    """앞 글자에 붙어 한 음절을 이루는가.
+
+    결합 문자는 _invisible 이 이미 걷어냈으므로 여기서는 한글 자모만 본다.
+    """
     code = ord(char)
     return code in _JAMO_MEDIAL or code in _JAMO_FINAL
 
@@ -240,13 +255,6 @@ def _normalize(text: str) -> tuple[str, list[int], list[int]]:
         while end < len(보이는글자) and _joins_previous(보이는글자[end]):
             end += 1
         composed = unicodedata.normalize("NFC", "".join(보이는글자[index:end]))
-        # NFC 가 합치지 못한 결합 기호는 걷어낸다. 숫자에는 결합형이 없어
-        # `900101-1́234568` 의 U+0301 이 그대로 남아 숫자열을 쪼갰고, 이름에서는
-        # `김수́현` 이 `[이름_1]́현` 으로 반쯤 남는 부분 유출을 만들었다.
-        composed = "".join(ch for ch in composed if unicodedata.combining(ch) == 0)
-        if not composed:
-            index = end
-            continue
 
         합쳐짐 = len(composed) < end - index
         for offset, composed_char in enumerate(composed):
