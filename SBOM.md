@@ -36,6 +36,20 @@
 | 11 | pytest-cov | 7.1.0 | MIT | https://github.com/pytest-dev/pytest-cov | 커버리지 측정 |
 | 12 | hatchling | (빌드시) | MIT | https://github.com/pypa/hatch | 패키지 빌드 백엔드 |
 
+## 이 문서가 실제와 어긋나지 않게 하는 방법
+
+손으로 관리하는 SBOM 은 반드시 어긋난다. CI 가 매 푸시마다 실제 설치된 것에서
+라이선스를 뽑아 **허용 목록**과 대조한다 (`.github/workflows/ci.yml` 의 license 잡).
+
+금지 목록이 아니라 허용 목록인 것이 중요하다. "GPL 을 걸러낸다" 는 식으로 짜면
+목록에 없는 새 라이선스가 조용히 통과한다. 허용 목록은 모르는 것이 들어오는 순간
+실패하므로, 심사 전에 사람이 먼저 본다.
+
+허용하는 표기(2026-08-07 기준): `Apache Software License`, `BSD License`,
+`BSD-3-Clause`, `MIT`, `MIT License`, `Mozilla Public License 2.0 (MPL 2.0)`,
+`PSF-2.0`, `Python Software Foundation License`. 같은 라이선스가 두 표기로 나오는
+것은 패키지마다 분류자(classifier)를 쓰기도 하고 SPDX 를 쓰기도 하기 때문이다.
+
 ## 라이선스 양립성 검토
 
 본 프로젝트는 Apache-2.0으로 배포한다. 사용 의존성의 라이선스는 다음과 같이 양립한다.

@@ -80,3 +80,28 @@ def test_report는_선언된_한계를_0점으로_공표한다(tmp_path):
     assert code == 0
     assert "NAME" in out
     assert "0.000" in out
+
+
+def test_설치본에서도_기본_골든셋을_찾는다(tmp_path, monkeypatch):
+    """`pip install sumunjang` 한 사람이 report 를 칠 수 있어야 한다.
+
+    저장소를 클론하지 않고도 README 의 수치를 재현할 수 있어야 "재현 가능한
+    자체 평가" 라는 말이 성립한다. 작업 디렉토리에 골든셋이 없으면 패키지에
+    함께 실린 사본을 쓴다.
+    """
+    from sumunjang.cli import default_goldensets
+
+    monkeypatch.chdir(tmp_path)
+
+    for path in default_goldensets():
+        assert path.is_dir(), f"패키지에 골든셋이 실려 있지 않다: {path}"
+
+
+def test_작업_디렉토리의_골든셋이_패키지_사본보다_앞선다(tmp_path, monkeypatch):
+    """저장소 안에서는 저장소의 셋을 채점해야 한다. 고친 것이 바로 보여야 하므로."""
+    from sumunjang.cli import default_goldensets
+
+    (tmp_path / "goldenset").mkdir()
+    monkeypatch.chdir(tmp_path)
+
+    assert default_goldensets()[0] == tmp_path / "goldenset"

@@ -1,0 +1,94 @@
+name: CI
+
+# 검증 단계에서 심사자가 클린 환경에서 직접 돌린다. 그 환경을 그대로 흉내낸다 —
+# API 키도 네트워크도 없이 전체 테스트가 돌아야 한다.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: 테스트 (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # pyproject 의 requires-python = ">=3.10" 을 실제로 시험한다.
+        # 적어 놓기만 하고 확인하지 않으면 그것은 주장이지 사실이 아니다.
+        python: ["3.10", "3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: 의존성 설치
+        run: uv venv && uv pip install -e ".[dev]"
+
+      - name: 테스트
+        # API 키를 명시적으로 비워 둔다. 테스트가 실수로 네트워크에 나가려 하면
+        # 조용히 통과하는 대신 실패해야 한다.
+        env:
+          ANTHROPIC_API_KEY: ""
+        run: uv run pytest -q --cov=sumunjang --cov-report=term-missing
+
+      - name: 골든셋 채점 (README 수치가 재현되는지)
+        run: uv run sumunjang report
+
+  package:
+    name: 패키지 (설치본이 저장소 없이 동작하는가)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+
+      - name: 빌드
+        run: uv build
+
+      - name: 저장소 밖에서 설치·실행
+        # 검증기관은 클론하지 않고 설치본만 받을 수 있다. 골든셋이 wheel 에
+        # 실려 있지 않으면 report 가 여기서 깨진다.
+        run: |
+          mkdir -p /tmp/clean && cd /tmp/clean
+          uv venv
+          uv pip install --python .venv/bin/python "$GITHUB_WORKSPACE"/dist/*.whl
+          echo "고객 900101-1234568 / 성명: 최윤서" | .venv/bin/sumunjang mask -
+          .venv/bin/sumunjang report
+
+  license:
+    name: 라이선스 (의존성 계보)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+
+      - name: 런타임 의존성 라이선스 수집
+        # 대회에 라이선스 검증 단계가 있다. SBOM.md 를 손으로 관리하면 반드시
+        # 어긋나므로 실제 설치된 것에서 뽑는다. 개발 의존성은 배포물에 들어가지
+        # 않으므로 런타임만 설치한다.
+        run: |
+          uv venv && uv pip install -e . pip-licenses
+          uv run pip-licenses --format=markdown --with-urls --order=license
+
+      - name: 허용 목록 밖의 라이선스 차단
+        # 금지 목록이 아니라 허용 목록으로 막는다. "GPL 을 걸러낸다" 는 식으로
+        # 짜면 목록에 없는 새 라이선스가 조용히 통과한다. 허용 목록은 모르는
+        # 것이 들어오는 순간 실패하므로, 심사 전에 사람이 먼저 본다.
+        #
+        # 같은 라이선스가 두 표기로 나오는 것은 패키지마다 분류자(classifier)를
+        # 쓰기도 하고 SPDX 를 쓰기도 하기 때문이다. 둘 다 적는다.
+        run: |
+          uv run pip-licenses --allow-only=\
+          "Apache Software License;\
+          BSD License;BSD-3-Clause;\
+          MIT;MIT License;\
+          Mozilla Public License 2.0 (MPL 2.0);\
+          PSF-2.0;Python Software Foundation License" \
+            --ignore-packages pip-licenses prettytable wcwidth tomli

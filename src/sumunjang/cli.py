@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 from typing import IO
 
 from .detect import detect
@@ -21,6 +22,30 @@ from .mask import Session, mask, restore
 # 한 표에 합치면 "쉬운 것만 골랐다" 는 반문에도, "왜 점수가 낮냐" 는 반문에도
 # 답할 수 없다. 나눠서 각각의 의미를 붙인다.
 DEFAULT_GOLDENSETS = ("goldenset", "goldenset-hard", "goldenset-gaps")
+
+
+def default_goldensets() -> list[Path]:
+    """기본 골든셋이 실제로 놓여 있는 자리를 찾는다.
+
+    같은 파일이 배포 형태에 따라 세 군데에 놓인다.
+
+      1. 작업 디렉토리 — 저장소 안에서 작업할 때. 고친 것이 바로 채점돼야 하므로
+         가장 앞에 둔다.
+      2. 패키지 디렉토리 — `pip install sumunjang` 한 경우. wheel 에 함께 싣는다
+         (pyproject 의 force-include). 저장소를 클론하지 않고도 README 의 수치를
+         재현할 수 있어야 "재현 가능한 자체 평가" 라는 말이 성립한다.
+      3. 패키지의 조부모 디렉토리 — `pip install -e .` 로 소스에서 실행할 때.
+         src/sumunjang/cli.py 의 두 단계 위가 저장소 루트다.
+    """
+    package = Path(__file__).resolve().parent
+    bases = (Path.cwd(), package, package.parents[1])
+    found = []
+    for name in DEFAULT_GOLDENSETS:
+        for base in bases:
+            if (base / name).is_dir():
+                found.append(base / name)
+                break
+    return found
 
 
 def _read_input(source: str, stdin: IO[str]) -> str:
@@ -92,8 +117,6 @@ def _totals(result: dict[str, dict]) -> tuple[int, int, int]:
 
 
 def _print_table(directory: str, count: int, result: dict[str, dict], stdout: IO[str]) -> None:
-    from pathlib import Path
-
     expected, detected, hit = _totals(result)
     print(f"\n## {Path(directory).name}\n", file=stdout)
     print(f"- 문서 {count}건, 정답 {expected}건", file=stdout)
@@ -134,10 +157,9 @@ _LIMITS = """
 
 def _report(args, stdout: IO[str], stderr: IO[str]) -> int:
     import json as json_module
-    from pathlib import Path
 
     explicit = args.directories != list(DEFAULT_GOLDENSETS)
-    targets = [d for d in args.directories if explicit or Path(d).is_dir()]
+    targets = [str(d) for d in (args.directories if explicit else default_goldensets())]
     if not targets:
         print(f"골든셋 디렉토리가 없습니다: {' '.join(args.directories)}", file=stderr)
         return 3
