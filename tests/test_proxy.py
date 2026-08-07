@@ -344,12 +344,15 @@ def test_마스킹이_깨지면_업스트림에_아무것도_보내지_않는다
 
     보안 도구의 실패 모드는 통과가 아니라 차단이어야 한다.
     """
-    import sumunjang.proxy as proxy_module
+    from sumunjang.mask import Session
 
     def 폭발(*args, **kwargs):
-        raise RuntimeError("탐지 중 예외")
+        raise RuntimeError("마스킹 중 예외")
 
-    monkeypatch.setattr(proxy_module, "mask_request", 폭발)
+    # 마스킹 도중 무엇이 터지든 상관없다는 것을 시험한다. 특정 모듈 속성을
+    # 갈아끼우면 `from X import y` 가 이미 붙잡은 참조를 비껴가므로, 호출
+    # 시점에 조회되는 메서드를 터뜨린다.
+    monkeypatch.setattr(Session, "placeholder_for", 폭발)
 
     upstream, response = asyncio.run(
         _call("POST", "/v1/messages", {"messages": [{"role": "user", "content": "고객 900101-1234568"}]})
@@ -357,3 +360,106 @@ def test_마스킹이_깨지면_업스트림에_아무것도_보내지_않는다
 
     assert response.status_code == 500
     assert upstream.path is None, "마스킹이 깨졌는데 업스트림에 요청이 갔다"
+
+
+# ── OpenAI 호환 경로 ──────────────────────────────────────────────────────
+# 마스킹 계층은 프로토콜과 무관하다. 본문 모양과 SSE 형식만 다르다.
+
+
+class OpenAIUpstream:
+    """OpenAI 응답 모양으로 되읊는 업스트림."""
+
+    def __init__(self) -> None:
+        self.received: dict | None = None
+
+    async def __call__(self, scope, receive, send):
+        chunks = []
+        while True:
+            message = await receive()
+            chunks.append(message.get("body", b""))
+            if not message.get("more_body"):
+                break
+        self.received = json.loads(b"".join(chunks))
+
+        echoed = self.received["messages"][0]["content"]
+        payload = json.dumps(
+            {
+                "id": "chatcmpl-test",
+                "object": "chat.completion",
+                "model": "gpt-4o",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": f"확인했습니다: {echoed}"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            }
+        ).encode()
+
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [(b"content-type", b"application/json")],
+            }
+        )
+        await send({"type": "http.response.body", "body": payload})
+
+
+async def _openai_roundtrip(body: dict):
+    upstream = OpenAIUpstream()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=upstream), base_url="http://upstream"
+    ) as upstream_client:
+        app = create_app(upstream_base_url="http://upstream", client=upstream_client)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://proxy"
+        ) as proxy_client:
+            response = await proxy_client.post("/v1/chat/completions", json=body)
+    return upstream, response
+
+
+def test_OpenAI_경로도_업스트림에는_가명_사용자에게는_원문():
+    upstream, response = asyncio.run(
+        _openai_roundtrip(
+            {"model": "gpt-4o", "messages": [{"role": "user", "content": "고객 900101-1234568 조회"}]}
+        )
+    )
+
+    나간본문 = json.dumps(upstream.received, ensure_ascii=False)
+    assert "900101-1234568" not in 나간본문
+    assert "주민등록번호_1" in 나간본문
+
+    돌아온것 = response.json()["choices"][0]["message"]["content"]
+    assert "900101-1234568" in 돌아온것
+
+
+def test_OpenAI_스트리밍은_복원된_내용을_data_줄로_돌려준다():
+    """OpenAI SSE 는 event 줄이 없고 data 줄만 있으며 [DONE] 으로 끝난다."""
+    upstream, response = asyncio.run(
+        _openai_roundtrip(
+            {
+                "model": "gpt-4o",
+                "stream": True,
+                "messages": [{"role": "user", "content": "고객 900101-1234568 조회"}],
+            }
+        )
+    )
+
+    assert "stream" not in upstream.received, "업스트림에는 통짜로 요청해야 한다"
+    assert response.headers["content-type"].startswith("text/event-stream")
+
+    본문 = response.text
+    assert 본문.rstrip().endswith("data: [DONE]")
+    assert "event:" not in 본문, "OpenAI SSE 에는 event 줄이 없다"
+
+    조각들 = [
+        json.loads(line[len("data: ") :])
+        for line in 본문.splitlines()
+        if line.startswith("data: ") and line != "data: [DONE]"
+    ]
+    모인글 = "".join(c["choices"][0]["delta"].get("content", "") for c in 조각들)
+    assert "900101-1234568" in 모인글
+    assert 조각들[-1]["choices"][0]["finish_reason"] == "stop"

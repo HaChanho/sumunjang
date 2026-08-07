@@ -89,6 +89,34 @@ def test_업스트림으로_나가는_요청_본문에_원문이_남지_않는�
     assert residue == [], f"업스트림 본문에 원문이 남았다: {residue}"
 
 
+def test_OpenAI_본문에도_원문이_남지_않는다():
+    """프로토콜이 늘면 검사도 늘어야 한다.
+
+    이 파일이 마스킹 함수가 아니라 **와이어로 나가는 바이트**를 검사 대상으로
+    잡아 둔 덕에, 새 프로토콜을 붙일 때 본문 모양만 바꿔 같은 보증을 받는다.
+    """
+    from sumunjang.openai import mask_request as openai_mask_request
+
+    residue: list[tuple[str, str]] = []
+
+    for document in _documents():
+        body = {
+            "model": "gpt-4o",
+            "messages": [
+                {"role": "system", "content": document.text},
+                {"role": "user", "content": [{"type": "text", "text": document.text}]},
+                {"role": "tool", "tool_call_id": "call_1", "content": document.text},
+            ],
+        }
+
+        wire = json.dumps(openai_mask_request(body, Session()), ensure_ascii=False)
+        residue.extend(
+            (document.doc_id, secret) for secret in _secrets_of(document) if secret in wire
+        )
+
+    assert residue == [], f"OpenAI 본문에 원문이 남았다: {residue}"
+
+
 def test_말뭉치가_그물_노릇을_할_수_있는_상태다():
     """앞의 두 테스트가 공허하게 통과하지 않는지 확인한다.
 

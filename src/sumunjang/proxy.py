@@ -8,12 +8,16 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Callable
 
 import httpx
 
 from .anthropic import count_masked, mask_request, restore_response
 from .mask import Session
+from .openai import count_masked as openai_count_masked
+from .openai import mask_request as openai_mask_request
+from .openai import restore_response as openai_restore_response
 
 ANTHROPIC_API = "https://api.anthropic.com"
 
@@ -23,12 +27,6 @@ _SKIP_HEADERS = {b"host", b"content-length", b"connection", b"accept-encoding"}
 # 경로마다 다르게 다룬다. 기본값은 통과가 아니라 차단이다 — 경계 게이트웨이가
 # 모르는 경로를 흘려보내면 마스킹을 거치지 않은 본문이 그대로 나간다.
 #
-# 마스킹해서 넘기는 경로. 두 엔드포인트는 본문 모양이 같아 같은 변환을 쓴다.
-# count_tokens 를 막아 두면 도구가 문맥 길이를 재지 못하고, 그냥 통과시키면
-# 원문이 그대로 나간다. 마스킹한 본문의 토큰 수가 실제로 나가는 본문의 토큰
-# 수이므로 오히려 정확하다.
-_MASKED_PATHS = ("/v1/messages", "/v1/messages/count_tokens")
-
 # 개인정보가 실릴 수 없는 읽기 전용 경로. 본문이 없고 경로에 식별자만 온다.
 _PASSTHROUGH_PREFIX = "/v1/models"
 
@@ -121,11 +119,48 @@ def _as_sse_events(message: dict) -> list[tuple[str, dict]]:
     return events
 
 
-async def _send_sse(send, message: dict) -> None:
-    payload = b"".join(
+def _anthropic_sse(message: dict) -> bytes:
+    return b"".join(
         f"event: {name}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n".encode()
         for name, data in _as_sse_events(message)
     )
+
+
+def _openai_sse(message: dict) -> bytes:
+    """완성된 chat.completion 을 chat.completion.chunk 열로 펼친다.
+
+    Anthropic 과 형식이 다르다. event 줄이 없고 data 줄만 있으며, 마지막에
+    `data: [DONE]` 이 온다. 청크마다 완성본이 아니라 **증분(delta)** 이 실린다.
+    """
+    본 = {
+        key: message[key]
+        for key in ("id", "model", "created", "system_fingerprint")
+        if message.get(key) is not None
+    }
+    본["object"] = "chat.completion.chunk"
+
+    chunks: list[dict] = []
+    for choice in message.get("choices", []):
+        index = choice.get("index", 0)
+        answer = choice.get("message", {})
+
+        def 조각(delta: dict, finish=None) -> dict:
+            return {**본, "choices": [{"index": index, "delta": delta, "finish_reason": finish}]}
+
+        chunks.append(조각({"role": answer.get("role", "assistant")}))
+        if answer.get("content"):
+            chunks.append(조각({"content": answer["content"]}))
+        for n, call in enumerate(answer.get("tool_calls") or []):
+            chunks.append(조각({"tool_calls": [{"index": n, **call}]}))
+        chunks.append(조각({}, choice.get("finish_reason")))
+
+    payload = b"".join(
+        f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n".encode() for chunk in chunks
+    )
+    return payload + b"data: [DONE]\n\n"
+
+
+async def _send_sse(send, payload: bytes) -> None:
     await send(
         {
             "type": "http.response.start",
@@ -184,6 +219,39 @@ async def _passthrough(send, client, owns_client, upstream_base_url, path, heade
     await send({"type": "http.response.body", "body": upstream.content})
 
 
+@dataclass(frozen=True)
+class _Protocol:
+    """한 프로토콜의 본문 변환과 SSE 형식.
+
+    마스킹·복원 계층 자체는 프로토콜과 무관하다. 프로토콜마다 다른 것은
+    "본문의 어느 자리에 사람이 쓴 텍스트가 있는가" 와 스트리밍 형식뿐이다.
+    새 프로토콜을 붙이는 일이 이 표에 줄 하나를 더하는 일이 되도록 둔다.
+    """
+
+    mask: Callable[[dict, Session], dict]
+    restore: Callable[[dict, Session], dict]
+    count: Callable[[dict], list[str]]
+    sse: Callable[[dict], bytes] | None
+
+
+_ANTHROPIC = _Protocol(mask_request, restore_response, count_masked, _anthropic_sse)
+_OPENAI = _Protocol(
+    openai_mask_request, openai_restore_response, openai_count_masked, _openai_sse
+)
+
+# 마스킹해서 넘기는 경로. 기본값은 통과가 아니라 차단이므로, 여기 없는 경로는
+# 업스트림에 닿지 않는다.
+#
+# count_tokens 는 messages 와 본문 모양이 같아 같은 변환을 쓴다. 막아 두면 도구가
+# 문맥 길이를 재지 못하고, 그냥 통과시키면 원문이 그대로 나간다. 마스킹한 본문의
+# 토큰 수가 실제로 나가는 본문의 토큰 수이므로 오히려 정확하다.
+_PROTOCOLS = {
+    "/v1/messages": _ANTHROPIC,
+    "/v1/messages/count_tokens": _ANTHROPIC,
+    "/v1/chat/completions": _OPENAI,
+}
+
+
 def create_app(
     upstream_base_url: str = ANTHROPIC_API,
     client: httpx.AsyncClient | None = None,
@@ -212,7 +280,8 @@ def create_app(
             await _passthrough(send, client, owns_client, upstream_base_url, path, headers)
             return
 
-        if path not in _MASKED_PATHS or method != "POST":
+        protocol = _PROTOCOLS.get(path)
+        if protocol is None or method != "POST":
             await _send_json(
                 send,
                 404,
@@ -235,7 +304,7 @@ def create_app(
         before = len(session)
 
         try:
-            masked = mask_request(body, session)
+            masked = protocol.mask(body, session)
         except Exception as exc:  # noqa: BLE001 — 무엇이 터지든 나가면 안 된다
             # 보안 도구의 실패 모드는 통과가 아니라 차단이다. 마스킹이 깨졌는데
             # 요청을 그대로 흘려보내면 도구가 있는 편이 없는 편보다 위험해진다.
@@ -257,7 +326,7 @@ def create_app(
         if on_request is not None:
             # 이번 요청에서 실제로 가려진 자리를 센다. 세션에 이미 등록된 값이라고
             # 0건으로 보고하면 작동을 멈춘 것처럼 보인다 — 실제 왕복에서 겪은 문제다.
-            masked_here = count_masked(masked)
+            masked_here = protocol.count(masked)
             on_request(
                 {
                     "masked_count": len(masked_here),
@@ -302,10 +371,10 @@ def create_app(
             await send({"type": "http.response.body", "body": upstream.content})
             return
 
-        restored = restore_response(payload, session)
+        restored = protocol.restore(payload, session)
 
-        if wants_stream and upstream.status_code == 200:
-            await _send_sse(send, restored)
+        if wants_stream and upstream.status_code == 200 and protocol.sse is not None:
+            await _send_sse(send, protocol.sse(restored))
             return
 
         await _send_json(send, upstream.status_code, restored)
