@@ -74,9 +74,20 @@ class Session:
         # 예외를 요청자의 선언이 아니라 출처로 판정하기 위한 기억이다.
         self._emitted: dict[str, str] = {}
 
-    def placeholder_for(self, category: str, value: str) -> str:
-        """같은 값에는 언제나 같은 이름을 준다 — 모델이 문맥을 잃지 않도록."""
-        key = (category, value)
+    def placeholder_for(self, category: str, value: str, canonical: str | None = None) -> str:
+        """같은 값에는 언제나 같은 이름을 준다 — 모델이 문맥을 잃지 않도록.
+
+        `canonical` 은 재탐색에 쓸 정규화된 형태다. 복원은 사용자가 쓴 원문을
+        되돌려야 하지만 재탐색은 정규화된 텍스트에서 이루어지므로, 둘을 나눠
+        기억한다. 원문 조각만 기억했더니 NFD 로 처음 본 값이 영원히 자기를
+        알아보지 못했다 — 프록시가 자기 출력을 다시 못 알아보는 자기 유발
+        유출이었다.
+        """
+        # 동일성은 정규형으로 판단하고, 복원은 원문을 되돌린다. 키를 원문으로
+        # 두면 같은 사람의 NFC 표기와 NFD 표기가 다른 가명을 받아, 모델이
+        # 두 사람으로 읽는다.
+        찾을값 = canonical if canonical is not None else value
+        key = (category, 찾을값)
         if key in self._placeholder_by_value:
             return self._placeholder_by_value[key]
 
@@ -96,9 +107,9 @@ class Session:
         placeholder = f"[{label}_{self._counts[category]}]"
         self._placeholder_by_value[key] = placeholder
         self._value_by_placeholder[placeholder] = value
-        self._category_of[value] = category
-        묶음 = self._by_first.setdefault(value[0], [])
-        묶음.append(value)
+        self._category_of[찾을값] = category
+        묶음 = self._by_first.setdefault(찾을값[0], [])
+        묶음.append(찾을값)
         # 긴 값을 먼저 봐야 짧은 값이 긴 값의 앞부분을 먼저 먹지 않는다.
         묶음.sort(key=len, reverse=True)
         return placeholder
@@ -139,8 +150,10 @@ class Session:
         대안으로 묶었는데, 파이썬 정규식은 대안을 trie 로 접지 않고 **모든 입력
         위치에서 모든 대안을 차례로 시도한다.** 상한 10,000 에 도달하면 짧은
         본문 한 번 훑는 데 20초를 넘겼다. 상한값 자체가 프록시를 사용 불능으로
-        만드는 지점을 허용하고 있었던 셈이다. str.find 는 C 수준 탐색이라 같은
-        조건에서 10밀리초대에 끝난다.
+        만드는 지점을 허용하고 있었던 셈이다. str.find 와 첫 글자 색인으로
+        바꾼 지금은 같은 조건(세션 1만 건, 138KB 본문)에서 0.1~0.3초다.
+        여전히 요청 하나를 동기로 붙잡으므로 큰 본문에서는 이벤트 루프가
+        그만큼 멈춘다 — 정확성이 아니라 가용성의 한계다.
         """
         # 본문에 실제로 등장하는 첫 글자만 훑는다. 세션 값 전부를 매번 정렬해
         # 훑으면 비용이 (본문 문자열 수 × 세션 크기)로 곱해진다 — 세션 1만 건에
@@ -284,18 +297,24 @@ def mask(text: str, session: Session) -> str:
     """
     scan_text, starts, ends = normalize(text)
     구간 = set(find_in_normalized(scan_text)) | set(session.known_spans(scan_text))
+    if not 구간:
+        return text
+
+    # 정규화 좌표를 원문 좌표와 짝지어 들고 간다. 치환은 원문 위에서 하고,
+    # 세션에 기억시킬 재탐색용 값은 정규화된 쪽에서 떠낸다.
+    정규화좌표 = {(starts[s], ends[e - 1]): (s, e) for _, s, e in 구간}
     findings = sorted(
-        (Finding(category, starts[start], ends[end - 1]) for category, start, end in 구간),
+        (Finding(c, starts[s], ends[e - 1]) for c, s, e in 구간),
         key=lambda f: (f.start, f.end),
     )
-    if not findings:
-        return text
 
     pieces = []
     cursor = 0
     for category, start, end in _merge_overlapping(findings):
         pieces.append(text[cursor:start])
-        pieces.append(session.placeholder_for(category, text[start:end]))
+        n = 정규화좌표.get((start, end))
+        표준형 = scan_text[n[0] : n[1]] if n else None
+        pieces.append(session.placeholder_for(category, text[start:end], 표준형))
         cursor = end
     pieces.append(text[cursor:])
     return "".join(pieces)

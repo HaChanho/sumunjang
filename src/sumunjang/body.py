@@ -40,6 +40,7 @@ import binascii
 import re
 from typing import Any
 
+from .detect import detect
 from .mask import Session, mask
 
 # 글자로 읽을 수 없는 첨부의 미디어 타입. 여기에 해당해야만 알맹이를 건너뛴다.
@@ -74,7 +75,20 @@ def _opaque_base64(value: str, media_type: str) -> bool:
         풀린것 = base64.b64decode(value, validate=True)
     except (binascii.Error, ValueError):
         return False
-    return len(풀린것) >= _MIN_ATTACHMENT_BYTES
+    if len(풀린것) < _MIN_ATTACHMENT_BYTES:
+        return False
+
+    # 마지막이자 가장 중요한 관문 — **이 값에서 개인정보가 보이면 알맹이가 아니다.**
+    #
+    # 디코드되는지만 물었다가 뚫렸다. base64 알파벳은 숫자와 영문자를 전부
+    # 포함하므로, 구분자 없이 적은 한국 식별자와 API 키는 **인코딩 없이도**
+    # 조건을 만족한다. `AKIAIOSFODNN7EXAMPLE…` 은 그 자체가 유효한 base64 다.
+    # "제대로 인코딩해 그림이라고 주장해야 한다" 던 전제가 성립하지 않았다.
+    #
+    # 탐지되는지는 요청자가 흉내낼 수 없다. 개인정보처럼 보이면 그 순간 예외가
+    # 아니다. 진짜 그림의 base64 가 탐지 규칙에 걸릴 확률은 낮고, 걸린다면
+    # 가려서 첨부가 깨지는 쪽이 안전한 실패다.
+    return not detect(value)
 
 
 def _is_opaque(key: str, value: str, parent: dict, session: Session) -> bool:

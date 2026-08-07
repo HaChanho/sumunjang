@@ -269,3 +269,43 @@ def test_지나치게_긴_값은_세션에_담지_않는다():
 
     with pytest.raises(SessionFull):
         session.placeholder_for("EMAIL", "a" * (_MAX_VALUE_LENGTH + 1))
+
+
+def test_표기가_달라도_같은_값은_같은_가명을_받는다():
+    """동일성은 정규형으로 판단하고 복원은 원문을 되돌린다.
+
+    세션이 원문 조각을 키로 삼던 동안, NFD 로 처음 본 값은 NFC 로 다시 와도
+    자기를 알아보지 못해 그대로 유출됐다 — 프록시가 자기 출력을 다시 못
+    알아보는 자기 유발 유출이었다. 키를 원문으로 두면 같은 사람이 두 가명을
+    받아 모델이 두 사람으로 읽기도 한다.
+    """
+    import unicodedata
+
+    session = Session()
+    nfd = unicodedata.normalize("NFD", "김수현")
+
+    첫등장 = mask(f"담당자: {nfd}", session)
+    assert mask("이름은 김수현 입니다", session) == "이름은 [이름_1] 입니다"
+    # 복원은 사용자가 쓴 표기를 그대로 되돌린다.
+    assert restore(첫등장, session) == f"담당자: {nfd}"
+
+
+def test_NFC가_길이를_늘리는_문자에서_터지지_않는다():
+    """NFC 가 줄이거나 유지한다고 가정했는데, 합성 제외 문자는 늘린다.
+
+    그 문자가 텍스트 끝에 오면 좌표가 범위를 벗어나 크래시가 났다. 정상 입력에서
+    도구가 멈추고, 그 문자가 대화 기록에 들어가면 그 대화는 프록시를 영영
+    통과할 수 없었다.
+    """
+    import unicodedata
+
+    늘어나는것 = [
+        chr(cp)
+        for cp in range(0x10000)
+        if len(unicodedata.normalize("NFC", chr(cp))) > 1
+    ]
+    assert 늘어나는것, "이 테스트의 전제가 깨졌다 — 늘어나는 문자가 없다"
+
+    for 문자 in 늘어나는것:
+        mask("문의 " + 문자, Session())
+        mask(문자 + " 고객 900101-1234568", Session())

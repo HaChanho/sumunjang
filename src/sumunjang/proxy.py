@@ -195,7 +195,7 @@ def _openai_sse(message: dict) -> bytes:
     return payload + b"data: [DONE]\n\n"
 
 
-async def _send_sse(send, payload: bytes) -> None:
+async def _send_sse(send, payload: bytes, extra_headers=()) -> None:
     await send(
         {
             "type": "http.response.start",
@@ -203,6 +203,7 @@ async def _send_sse(send, payload: bytes) -> None:
             "headers": [
                 (b"content-type", b"text/event-stream"),
                 (b"cache-control", b"no-cache"),
+                *extra_headers,
             ],
         }
     )
@@ -521,9 +522,27 @@ def create_app(
             await send({"type": "http.response.body", "body": upstream.content})
             return
 
+        if not isinstance(payload, dict):
+            # 사전이 아닌 JSON(배열·문자열·숫자·null)은 우리가 다룰 모양이 아니다.
+            # 요청 경로에만 fail-closed 를 걸어 두고 응답 경로를 비워 뒀더니,
+            # 앞단에 게이트웨이가 끼어 그런 본문이 오면 예외가 ASGI 밖으로
+            # 터져 연결이 끊겼다. 손대지 않고 그대로 흘려보낸다.
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": upstream.status_code,
+                    "headers": [
+                        (b"content-type", upstream.headers.get("content-type", "application/json").encode()),
+                        *_forwarded_headers(upstream),
+                    ],
+                }
+            )
+            await send({"type": "http.response.body", "body": upstream.content})
+            return
+
         # 업스트림이 내려보낸 추론 서명을 기억해 둔다. 다음 턴에 클라이언트가
         # 그 블록을 되돌려보낼 때, 그것이 진짜 추론인지 판정하는 유일한 근거다.
-        for block in payload.get("content", []) if isinstance(payload, dict) else []:
+        for block in payload.get("content", []):
             if isinstance(block, dict):
                 서명 = block.get("signature")
                 본문 = block.get("thinking") or block.get("data")
@@ -533,7 +552,9 @@ def create_app(
         restored = protocol.restore(payload, session)
 
         if wants_stream and upstream.status_code == 200 and protocol.sse is not None:
-            await _send_sse(send, protocol.sse(restored))
+            # 스트리밍이 도구의 기본 경로다. 여기만 헤더를 빠뜨리면 정작 가장
+            # 많이 쓰는 길에서 retry-after 와 request-id 가 사라진다.
+            await _send_sse(send, protocol.sse(restored), _forwarded_headers(upstream))
             return
 
         await _send_json(

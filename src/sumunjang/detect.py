@@ -256,7 +256,10 @@ def _normalize(text: str) -> tuple[str, list[int], list[int]]:
             end += 1
         composed = unicodedata.normalize("NFC", "".join(보이는글자[index:end]))
 
-        합쳐짐 = len(composed) < end - index
+        # 길이가 **달라지면** 한 덩어리로 다룬다. 줄어드는 것만 생각했다가
+        # 늘어나는 경우에 좌표가 범위를 벗어나 크래시가 났다 — 합성 제외
+        # (composition exclusion) 문자 73개는 NFC 가 오히려 늘린다.
+        합쳐짐 = len(composed) != end - index
         for offset, composed_char in enumerate(composed):
             chars.append(composed_char)
             if 합쳐짐:

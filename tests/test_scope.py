@@ -244,33 +244,36 @@ def test_추론인_척하는_껍데기로_마스킹을_건너뛸_수_없다():
     assert 원문 not in _나간본문(anthropic_mask, body)
 
 
-def test_글이_담긴_base64_첨부는_건너뛰지_않는다():
-    """base64 알파벳을 만족한다고 알맹이인 것은 아니다.
+def test_base64_알파벳을_흉내낸_개인정보는_건너뛰지_않는다():
+    """예외 근거는 "디코드되는가" 가 아니라 "개인정보가 보이지 않는가" 다.
 
-    숫자만 늘어놓아도 조건을 통과한다. 미디어 타입까지 봐서, 글자로 읽을 수 없는
-    것(그림·PDF)만 건너뛴다.
+    base64 알파벳은 숫자와 영문자를 전부 포함한다. 그래서 구분자 없이 적은 한국
+    식별자와 API 키는 **인코딩 없이도** 조건을 만족한다 —
+    `AKIAIOSFODNN7EXAMPLE…` 은 그 자체가 유효한 base64 다. "제대로 인코딩해
+    그림이라고 주장해야 한다" 던 전제가 성립하지 않았다.
+
+    탐지되는지는 요청자가 흉내낼 수 없다.
     """
     import base64
 
-    진짜그림 = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"\x00" * 60).decode()
-    흉내낸것 = "A" * 20 + 원문 + "A" * 20   # base64 알파벳처럼 보이지만 디코드되지 않는다
+    for 흉내 in (
+        "AKIAIOSFODNN7EXAMPLE" + "A" * 24,      # AWS 키
+        "8503121000003" + "A" * 31,             # 붙여쓴 주민등록번호
+        "4111111111111111" + "A" * 28,          # 카드번호
+    ):
+        본문 = {"messages": [], "a": {"url": f"data:image/png;base64,{흉내}"}}
+        assert 흉내 not in _나간본문(anthropic_mask, 본문), f"흉내로 통과됨: {흉내[:24]}"
 
-    글첨부 = {"messages": [{"role": "user", "content": [
-        {"type": "document", "source": {
-            "type": "base64", "media_type": "text/plain", "data": 진짜그림}}]}]}
-    assert anthropic_mask(글첨부, Session()) is not None  # 글 첨부는 건너뛰지 않는다
+        블록 = {"messages": [{"role": "user", "content": [
+            {"type": "document", "source": {
+                "type": "base64", "media_type": "image/png", "data": 흉내}}]}]}
+        assert 흉내 not in _나간본문(anthropic_mask, 블록), f"흉내로 통과됨: {흉내[:24]}"
 
-    흉내첨부 = {"messages": [{"role": "user", "content": [
+    # 진짜 그림 알맹이는 훼손하면 안 된다.
+    진짜 = base64.b64encode(b"\x89PNG\r\n\x1a\n" + bytes(range(60))).decode()
+    그림 = {"messages": [{"role": "user", "content": [
         {"type": "image", "source": {
-            "type": "base64", "media_type": "image/png", "data": 흉내낸것}}]}]}
-    assert 원문 not in _나간본문(anthropic_mask, 흉내첨부), (
-        "디코드되지 않는 값은 알맹이가 아니다 — 모양만 흉내낸 것이다"
-    )
+            "type": "base64", "media_type": "image/png", "data": 진짜}}]}]}
+    나간것 = anthropic_mask(그림, Session())
+    assert 나간것["messages"][0]["content"][0]["source"]["data"] == 진짜
 
-    그림첨부 = {"messages": [{"role": "user", "content": [
-        {"type": "image", "source": {
-            "type": "base64", "media_type": "image/png", "data": 진짜그림}}]}]}
-    나간것 = anthropic_mask(그림첨부, Session())
-    assert 나간것["messages"][0]["content"][0]["source"]["data"] == 진짜그림, (
-        "진짜 그림 알맹이는 훼손하면 안 된다"
-    )
