@@ -1,5 +1,10 @@
 # 수문장 (sumunjang)
 
+[![CI](https://github.com/HaChanho/sumunjang/actions/workflows/ci.yml/badge.svg)](https://github.com/HaChanho/sumunjang/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/sumunjang)](https://pypi.org/project/sumunjang/)
+[![Python](https://img.shields.io/pypi/pyversions/sumunjang)](https://pypi.org/project/sumunjang/)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+
 **AI에게 물어보기 전에, 개인정보는 문 앞에서 멈춘다.**
 
 Claude Code나 ChatGPT에 로그·문서·설정 파일을 붙여넣는 순간, 주민등록번호·계좌번호·
@@ -39,6 +44,15 @@ $ echo "고객 900101-1234568, 010-9876-5432, kim@corp.co.kr" | sumunjang mask -
 $ sumunjang scan config.env        # 찾기만 한다. 발견 시 종료 코드 1 → CI 게이트로 사용
 $ sumunjang report                 # 골든셋으로 탐지 성능을 스스로 채점
 ```
+
+설치해서 쓰려면:
+
+```bash
+pip install sumunjang      # 또는 uv pip install sumunjang
+```
+
+골든셋이 패키지에 함께 실려 있어, 저장소를 클론하지 않아도 `sumunjang report` 로
+아래 수치를 그대로 재현할 수 있습니다.
 
 ## 무엇을 막는가
 
