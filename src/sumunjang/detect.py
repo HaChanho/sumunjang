@@ -152,15 +152,29 @@ def _anchored(anchors: str, value: str, gap: str = _GAP_LOOSE) -> re.Pattern[str
 # 목록으로 관리하다 계속 뚫렸다. U+200B 를 막으면 U+2063 으로, 그것을 막으면
 # U+00AD·U+2066·U+034F 로 우회한다. 목록은 언제나 공격자보다 늦다.
 #
-# 그래서 부류로 막는다. 유니코드 범주 Cf(format)는 서식 제어 문자 전체이고,
-# Mn(nonspacing mark) 중 폭이 0인 것은 결합 문자다. 이 둘을 걷어내면 "보이지
-# 않는 문자를 끼워 넣는다" 는 우회 수단 자체가 닫힌다.
+# 그래서 부류로 막는다. 유니코드 범주 Cf(format)와 폭 0 결합 문자(Mn)를 걷어낸다.
+#
+# 다만 범주만으로는 닫히지 않는다. **눈에 보이지 않는 것과 유니코드가 분류하는
+# 방식이 일치하지 않기 때문이다.** U+3164 한글 채움 문자는 범주가 Lo(글자)인데
+# 화면에는 아무것도 그리지 않고, 한국에서 공백 닉네임용으로 널리 쓰인다.
+# U+2800 점자 공백은 So(기호), U+00A0 은 Zs(공백)다. 범주로 한 겹 막고
+# 목록으로 한 겹 더 막는다 — 어느 한쪽도 혼자서는 충분하지 않다.
 #
 # 전각 숫자는 이 처리가 필요 없다 — 정규식의 \d 와 int() 가 유니코드 십진
 # 숫자를 그대로 인식한다.
+_INVISIBLE_EXTRA = frozenset(
+    "\u3164"      # 한글 채움 문자 (Lo) — 공백 닉네임에 쓰인다
+    "\u115f\u1160"  # 한글 초성·중성 채움 (Lo)
+    "\uffa0"      # 반각 한글 채움 (Lo)
+    "\u2800"      # 점자 공백 (So)
+    "\u00a0\u2007\u202f"  # 줄바꿈 없는 공백들 (Zs)
+    "\u2028\u2029"  # 줄·문단 구분자 (Zl, Zp)
+)
 
 
 def _invisible(char: str) -> bool:
+    if char in _INVISIBLE_EXTRA:
+        return True
     category = unicodedata.category(char)
     return category == "Cf" or (category == "Mn" and unicodedata.combining(char) == 0)
 

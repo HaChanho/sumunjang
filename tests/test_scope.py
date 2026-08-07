@@ -162,3 +162,62 @@ def test_구조를_가리키는_값은_손상되지_않는다():
 
     assert 나간것["model"] == "claude-opus-4"
     assert 나간것["messages"][0]["content"][0]["tool_use_id"] == "toolu_01ABC"
+
+
+# ── 예외 판정은 자리와 값을 함께 본다 ──────────────────────────────────
+# 얕은 신호(키 이름, 값 접두사)만으로 판정하다 세 번 뚫렸다. 공격자가 그 신호를
+# 직접 쓸 수 있으면 그것은 예외 조건이 아니라 우회 스위치다.
+
+우회스위치 = {
+    "data: 접두사만 붙이기": {"messages": [{"role": "user", "content": f"data:text/plain;base64, 주민등록번호 {원문}"}]},
+    "signature 라는 키를 아무 데나": {"messages": [], "metadata": {"audit": {"signature": f"홍길동 {원문}"}}},
+    "type 을 base64 라고 적어두기": {"messages": [{"role": "user", "content": [
+        {"type": "document", "source": {"type": "base64", "media_type": "text/plain", "data": f"주민번호 {원문}"}}]}]},
+}
+
+
+@pytest.mark.parametrize("수법", 우회스위치)
+def test_얕은_신호로_마스킹을_건너뛸_수_없다(수법):
+    assert 원문 not in _나간본문(anthropic_mask, 우회스위치[수법]), f"{수법} 으로 우회됨"
+
+
+def test_숫자로_들어온_식별자도_가린다():
+    """CSV·로그를 JSON 으로 옮겨 붙이면 식별자가 숫자형으로 들어온다.
+
+    가려야 할 것이 있으면 문자열로 바뀐다. 그래서 업스트림이 거부한다면 그것은
+    눈에 보이는 실패다.
+    """
+    유효한_주민등록번호 = 8803121000068
+    body = {"messages": [], "metadata": {"v": 유효한_주민등록번호}}
+
+    assert str(유효한_주민등록번호) not in _나간본문(anthropic_mask, body)
+
+
+def test_구조를_이루는_숫자는_그대로_둔다():
+    """개인정보처럼 생기지 않은 숫자는 탐지기가 반응하지 않으므로 형이 유지된다."""
+    body = {"messages": [], "max_tokens": 1024, "temperature": 0.7, "stream": True}
+
+    나간것 = anthropic_mask(body, Session())
+
+    assert 나간것["max_tokens"] == 1024
+    assert 나간것["temperature"] == 0.7
+    assert 나간것["stream"] is True
+
+
+def test_추론_블록은_본문과_서명을_함께_보존한다():
+    """서명이 본문을 보증한다. 본문만 가리고 서명을 남기면 서명이 보증하지 못하는
+    본문이 되어 다음 턴이 거부된다.
+
+    추론은 모델이 만든 글이라 사용자 원문이 있을 수 없다 — 인바운드가 모두 가려진
+    상태이므로 모델은 원문을 본 적이 없다. 모델이 스스로 만들어낸 메일 주소가
+    개인정보 규칙에 걸리는 것이 문제였다.
+    """
+    서명 = "ErUBCkYIBBgCKkBw" * 8
+    생각 = "보고서를 noreply@github.com 로 보낸다고 했다"
+    body = {"messages": [{"role": "assistant", "content": [
+        {"type": "thinking", "thinking": 생각, "signature": 서명}]}]}
+
+    블록 = anthropic_mask(body, Session())["messages"][0]["content"][0]
+
+    assert 블록["thinking"] == 생각
+    assert 블록["signature"] == 서명

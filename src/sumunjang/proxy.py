@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import posixpath
 import sys
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -318,7 +319,13 @@ def create_app(
             if key.lower() not in _SKIP_HEADERS
         }
 
-        if method == "GET" and (path == _PASSTHROUGH_EXACT or path.startswith(_PASSTHROUGH_PREFIX)):
+        # 점 구간을 먼저 접는다. /v1/models/../../v1/organizations/me 는 접두사
+        # 검사를 통과하지만 http 클라이언트가 정규화해 전혀 다른 엔드포인트를
+        # 사용자 키로 호출한다. "모르면 차단" 이 경로 문법으로 뚫리면 안 된다.
+        normalized = posixpath.normpath(path)
+        if method == "GET" and (
+            normalized == _PASSTHROUGH_EXACT or normalized.startswith(_PASSTHROUGH_PREFIX)
+        ):
             # 본문이 없다는 것이 경로·쿼리에 개인정보가 없다는 뜻은 아니다.
             # /v1/models/900101-1234568?email=... 은 그대로 나갈 수 있다.
             passthrough_session = session_for(headers)
@@ -328,7 +335,7 @@ def create_app(
                 client,
                 owns_client,
                 upstream_base_url,
-                mask(path, passthrough_session),
+                mask(normalized, passthrough_session),
                 headers,
                 mask(query, passthrough_session),
             )
@@ -362,6 +369,15 @@ def create_app(
             before = len(session)
             wants_stream = bool(body["stream"]) if "stream" in body else False
             masked = protocol.mask(body, session)
+            # 업스트림에는 통짜로 요청한다. 복원을 끝낸 뒤 클라이언트에게만
+            # 스트리밍으로 보인다. stream_options 도 함께 뗀다 — OpenAI 는
+            # stream 이 참일 때만 이 필드를 허용하므로 남겨 두면 400 이 된다.
+            #
+            # 이 두 줄이 try 밖에 있던 동안, 사전이 아닌 본문(배열·문자열)에서
+            # pop 이 터져 설계한 500 대신 서버의 맨 500 이 나갔다. 주석은
+            # "여기서 걸린다" 고 적혀 있었지만 실제로는 한 줄 아래에서 터졌다.
+            masked.pop("stream", None)
+            masked.pop("stream_options", None)
         except SessionFull as exc:
             print(f"[수문장] {exc}", file=sys.stderr, flush=True)
             await _send_json(
@@ -389,11 +405,6 @@ def create_app(
             )
             return
 
-        # 업스트림에는 통짜로 요청한다. 복원을 끝낸 뒤 클라이언트에게만 스트리밍으로 보인다.
-        # stream_options 도 함께 뗀다 — OpenAI 는 stream 이 참일 때만 이 필드를
-        # 허용하므로, 남겨 두면 통짜 요청이 400 으로 거부된다.
-        masked.pop("stream", None)
-        masked.pop("stream_options", None)
 
         if on_request is not None:
             # 이번 요청에서 실제로 가려진 자리를 센다. 세션에 이미 등록된 값이라고
