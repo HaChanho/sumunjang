@@ -175,8 +175,11 @@ _INVISIBLE_EXTRA = frozenset(
 def _invisible(char: str) -> bool:
     if char in _INVISIBLE_EXTRA:
         return True
-    category = unicodedata.category(char)
-    return category == "Cf" or (category == "Mn" and unicodedata.combining(char) == 0)
+    # Cf 서식 제어, Mn 폭 0 결합, Me 감싸는 결합. 셋 다 스스로는 자리를 차지하지
+    # 않는다. Me 를 빠뜨렸다가 U+20E3 을 끼운 주민등록번호를 통째로 놓쳤다.
+    return unicodedata.category(char) in ("Cf", "Me") or (
+        unicodedata.category(char) == "Mn" and unicodedata.combining(char) == 0
+    )
 
 
 # 한글 자모 중 앞 글자에 붙어 한 음절을 이루는 것들. 중성(V)과 종성(T)이다.
@@ -210,40 +213,51 @@ def _normalize(text: str) -> tuple[str, list[int], list[int]]:
     (NFC)으로 합친다. macOS 가 만든 파일명이나 일부 입력기가 NFD 를 내보내므로
     "김수현" 이 눈에는 같아 보이는데 코드포인트가 달라 사전과 어긋난다.
 
-    마스킹은 언제나 원문 좌표 위에서 일어나야 하므로 정규화된 문자열만으로는
-    부족하다. 되돌아갈 지도를 함께 들고 다닌다.
+    **두 일을 한 번에 하면 안 된다.** 한 번에 훑으면 자모 사이에 끼어든 제로폭
+    문자가 묶음을 끊어 NFC 가 완성되지 않는다 — 두 우회 수단을 겹쳐 쓰면 둘 다
+    막았는데도 빠져나간다. 그래서 먼저 전부 걷어내고, 그 다음 합친다.
 
     지도는 시작과 끝을 **둘 다** 적는다. 시작만 적었더니 NFC 가 세 코드포인트를
     한 글자로 합친 자리에서 끝이 한 칸으로 계산돼, "김수현" 이 "[이름_1]ᅧᆫ" 으로
-    반쯤 남았다. 합쳐진 글자의 원문 끝은 시작 + 1 이 아니다.
+    반쯤 남았다.
     """
+    # 1단계 — 보이지 않는 문자를 걷어낸다. 원문 자리를 함께 들고 간다.
+    보이는글자: list[str] = []
+    원자리: list[int] = []
+    for index, char in enumerate(text):
+        if not _invisible(char):
+            보이는글자.append(char)
+            원자리.append(index)
+
+    # 2단계 — 결합 문자와 한글 자모를 묶어 NFC 로 합친다.
     chars: list[str] = []
     starts: list[int] = []
     ends: list[int] = []
 
     index = 0
-    while index < len(text):
-        char = text[index]
-        if _invisible(char):
-            index += 1
-            continue
-
-        # 이 글자에 이어지는 결합 문자까지 한 덩어리로 모아 NFC 로 합친다.
+    while index < len(보이는글자):
         end = index + 1
-        while end < len(text) and _joins_previous(text[end]):
+        while end < len(보이는글자) and _joins_previous(보이는글자[end]):
             end += 1
-        composed = unicodedata.normalize("NFC", text[index:end])
+        composed = unicodedata.normalize("NFC", "".join(보이는글자[index:end]))
+        # NFC 가 합치지 못한 결합 기호는 걷어낸다. 숫자에는 결합형이 없어
+        # `900101-1́234568` 의 U+0301 이 그대로 남아 숫자열을 쪼갰고, 이름에서는
+        # `김수́현` 이 `[이름_1]́현` 으로 반쯤 남는 부분 유출을 만들었다.
+        composed = "".join(ch for ch in composed if unicodedata.combining(ch) == 0)
+        if not composed:
+            index = end
+            continue
 
         합쳐짐 = len(composed) < end - index
         for offset, composed_char in enumerate(composed):
             chars.append(composed_char)
             if 합쳐짐:
-                # 이 한 글자가 원문 [index, end) 전체에서 왔다.
-                starts.append(index)
-                ends.append(end)
+                # 이 한 글자가 원문 [원자리[index], 원자리[end-1]+1) 전체에서 왔다.
+                starts.append(원자리[index])
+                ends.append(원자리[end - 1] + 1)
             else:
-                starts.append(index + offset)
-                ends.append(index + offset + 1)
+                starts.append(원자리[index + offset])
+                ends.append(원자리[index + offset] + 1)
         index = end
 
     return "".join(chars), starts, ends

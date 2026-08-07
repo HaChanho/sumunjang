@@ -64,6 +64,11 @@ class Session:
         # known_spans() 가 훑는 값→카테고리. 긴 값을 먼저 보아야 짧은 값이
         # 긴 값의 앞부분을 먼저 먹지 않는다.
         self._category_of: dict[str, str] = {}
+        # 첫 글자 → 그 글자로 시작하는 값들(긴 것부터). known_spans 가 쓰는 색인이다.
+        self._by_first: dict[str, list[str]] = {}
+        # 우리가 업스트림 응답에서 실제로 내보낸 추론 서명들.
+        # 예외를 요청자의 선언이 아니라 출처로 판정하기 위한 기억이다.
+        self._emitted_signatures: set[str] = set()
 
     def placeholder_for(self, category: str, value: str) -> str:
         """같은 값에는 언제나 같은 이름을 준다 — 모델이 문맥을 잃지 않도록."""
@@ -83,7 +88,24 @@ class Session:
         self._placeholder_by_value[key] = placeholder
         self._value_by_placeholder[placeholder] = value
         self._category_of[value] = category
+        묶음 = self._by_first.setdefault(value[0], [])
+        묶음.append(value)
+        # 긴 값을 먼저 봐야 짧은 값이 긴 값의 앞부분을 먼저 먹지 않는다.
+        묶음.sort(key=len, reverse=True)
         return placeholder
+
+    def remember_signature(self, signature: str) -> None:
+        """업스트림이 내려보낸 추론 서명을 기억한다.
+
+        추론 블록을 마스킹에서 빼주려면 그것이 진짜인지 알아야 하는데, 본문에
+        적힌 `type: "thinking"` 은 요청자가 그냥 쓰는 값이라 근거가 되지 못한다.
+        위조할 수 없는 유일한 신호는 **우리가 그 서명을 내보낸 적이 있는가** 다.
+        """
+        if signature:
+            self._emitted_signatures.add(signature)
+
+    def emitted_signature(self, signature: str) -> bool:
+        return signature in self._emitted_signatures
 
     def original_for(self, placeholder: str) -> str | None:
         return self._value_by_placeholder.get(placeholder)
@@ -107,15 +129,23 @@ class Session:
         만드는 지점을 허용하고 있었던 셈이다. str.find 는 C 수준 탐색이라 같은
         조건에서 10밀리초대에 끝난다.
         """
-        spans: list[tuple[str, int, int]] = []
+        # 본문에 실제로 등장하는 첫 글자만 훑는다. 세션 값 전부를 매번 정렬해
+        # 훑으면 비용이 (본문 문자열 수 × 세션 크기)로 곱해진다 — 세션 1만 건에
+        # 138KB 본문이 1.4초였다. 색인을 미리 만들어 두고 등장하는 글자만 본다.
+        후보: list[str] = []
+        본문글자 = set(text)
+        for 첫글자, 값들 in self._by_first.items():
+            if 첫글자 in 본문글자:
+                후보.extend(값들)
+        if not 후보:
+            return []
 
-        for value, category in sorted(
-            self._category_of.items(), key=lambda item: len(item[0]), reverse=True
-        ):
+        spans: list[tuple[str, int, int]] = []
+        for value in sorted(후보, key=len, reverse=True):
             start = text.find(value)
             while start != -1:
                 if self._boundary_ok(value, text, start):
-                    spans.append((category, start, start + len(value)))
+                    spans.append((self._category_of[value], start, start + len(value)))
                 start = text.find(value, start + 1)
 
         return spans
@@ -132,9 +162,21 @@ class Session:
         처럼 한글이 바로 붙은 자리에서 계좌번호가 가려지지 않았다 — 낱말이
         망가지는 것을 막으려던 규칙이 유출 방향으로 작동했다.
         """
-        if start == 0 or not ("가" <= value[0] <= "힣"):
-            return True
-        return not ("가" <= text[start - 1] <= "힣")
+        앞 = text[start - 1] if start else ""
+        뒤 = text[start + len(value)] if start + len(value) < len(text) else ""
+
+        if "가" <= value[0] <= "힣":
+            # 한글 값(이름)은 앞경계만 본다. "박이준" 안의 "이준" 은 다른 사람이다.
+            return not ("가" <= 앞 <= "힣")
+
+        # 숫자로 시작하는 값은 앞뒤로 숫자가 붙으면 안 된다. 경계를 아예 두지
+        # 않았더니 세션이 아는 계좌번호가 더 긴 주문번호 가운데를 갈랐다 —
+        # "주문번호 991234567890123" 이 "주문번호 99[계좌번호_1]123" 이 됐다.
+        # 유출은 아니지만 무관한 데이터를 조용히 훼손해 모델에게 넘긴다.
+        if value[0].isdecimal():
+            return not 앞.isdecimal() and not 뒤.isdecimal()
+
+        return True
 
     def entries(self) -> list[tuple[str, str]]:
         """가린 항목을 (카테고리, placeholder) 순서대로. 원문은 내보내지 않는다."""

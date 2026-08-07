@@ -11,6 +11,7 @@ import hashlib
 import json
 import posixpath
 import sys
+from urllib.parse import unquote
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -27,12 +28,31 @@ ANTHROPIC_API = "https://api.anthropic.com"
 # 업스트림으로 넘기지 않는 헤더. 홉 단위 정보와 길이는 새로 계산된다.
 _SKIP_HEADERS = {b"host", b"content-length", b"connection", b"accept-encoding"}
 
+# 업스트림 응답에서 클라이언트에게 그대로 넘겨야 하는 헤더.
+# 전부 버렸더니 429 의 retry-after 까지 사라져 SDK 의 백오프가 근거 없는
+# 지수 백오프로 떨어지고, request-id 가 없어 장애 신고 추적이 끊겼다.
+# 프록시를 끼웠다는 이유로 재시도 품질과 추적성이 조용히 나빠지면 안 된다.
+_FORWARD_RESPONSE_HEADERS = ("retry-after", "request-id", "x-request-id")
+_FORWARD_HEADER_PREFIXES = ("anthropic-ratelimit-", "x-ratelimit-", "openai-")
+
+
+def _forwarded_headers(upstream) -> list[tuple[bytes, bytes]]:
+    return [
+        (name.encode(), value.encode())
+        for name, value in upstream.headers.items()
+        if name.lower() in _FORWARD_RESPONSE_HEADERS
+        or name.lower().startswith(_FORWARD_HEADER_PREFIXES)
+    ]
+
 # 경로마다 다르게 다룬다. 기본값은 통과가 아니라 차단이다 — 경계 게이트웨이가
 # 모르는 경로를 흘려보내면 마스킹을 거치지 않은 본문이 그대로 나간다.
 #
 # 개인정보가 실릴 수 없는 읽기 전용 경로. 본문이 없고 경로에 식별자만 온다.
 # 경로 구분자까지 봐야 한다 — startswith 만 쓰면 /v1/models_backup 같은 미지
 # 경로가 통과해 "모르면 차단" 이 무너진다.
+# 요청 본문 크기 상한. 개수 상한만으로는 값 하나가 거대하면 막지 못한다.
+_MAX_BODY_BYTES = 32 * 1024 * 1024
+
 _PASSTHROUGH_EXACT = "/v1/models"
 _PASSTHROUGH_PREFIX = "/v1/models/"
 
@@ -189,7 +209,7 @@ async def _send_sse(send, payload: bytes) -> None:
     await send({"type": "http.response.body", "body": payload})
 
 
-async def _send_json(send, status: int, payload: Any) -> None:
+async def _send_json(send, status: int, payload: Any, extra_headers=()) -> None:
     body = json.dumps(payload, ensure_ascii=False).encode()
     await send(
         {
@@ -198,6 +218,7 @@ async def _send_json(send, status: int, payload: Any) -> None:
             "headers": [
                 (b"content-type", b"application/json"),
                 (b"content-length", str(len(body)).encode()),
+                *extra_headers,
             ],
         }
     )
@@ -232,7 +253,10 @@ async def _passthrough(
         {
             "type": "http.response.start",
             "status": upstream.status_code,
-            "headers": [(b"content-type", upstream.headers.get("content-type", "application/json").encode())],
+            "headers": [
+                (b"content-type", upstream.headers.get("content-type", "application/json").encode()),
+                *_forwarded_headers(upstream),
+            ],
         }
     )
     await send({"type": "http.response.body", "body": upstream.content})
@@ -328,16 +352,45 @@ def create_app(
         ):
             # 본문이 없다는 것이 경로·쿼리에 개인정보가 없다는 뜻은 아니다.
             # /v1/models/900101-1234568?email=... 은 그대로 나갈 수 있다.
-            passthrough_session = session_for(headers)
-            query = scope.get("query_string", b"").decode()
+            try:
+                passthrough_session = session_for(headers)
+            except SessionFull as exc:
+                # POST 는 429 를 내는데 GET 만 예외가 앱 밖으로 터지면 안 된다.
+                await _send_json(
+                    send,
+                    429,
+                    {"type": "error", "error": {"type": "session_full", "message": str(exc)}},
+                )
+                return
+            # 퍼센트 인코딩을 먼저 푼다. /v1/models?note=900101%2D1234568 은
+            # 그대로 보면 개인정보로 보이지 않지만 업스트림은 원문으로 읽는다.
+            # 푼 뒤 가려야 할 것이 나오면 요청 자체를 버린다 — 다시 인코딩해
+            # 보내는 것보다 거부가 안전하고, 모델 목록 조회에 개인정보가
+            # 실릴 이유가 없다.
+            raw_query = scope.get("query_string", b"").decode()
+            풀린것 = unquote(unquote(normalized + "?" + raw_query))
+            if mask(풀린것, passthrough_session) != 풀린것:
+                await _send_json(
+                    send,
+                    400,
+                    {
+                        "type": "error",
+                        "error": {
+                            "type": "pii_in_path",
+                            "message": "경로나 쿼리에 개인정보가 있어 요청을 보내지 않았습니다",
+                        },
+                    },
+                )
+                return
+            query = raw_query
             await _passthrough(
                 send,
                 client,
                 owns_client,
                 upstream_base_url,
-                mask(normalized, passthrough_session),
+                normalized,
                 headers,
-                mask(query, passthrough_session),
+                query,
             )
             return
 
@@ -351,6 +404,14 @@ def create_app(
             return
 
         raw = await _read_body(receive)
+        if len(raw) > _MAX_BODY_BYTES:
+            await _send_json(
+                send,
+                413,
+                {"type": "error", "error": {"type": "too_large", "message": "본문이 너무 큽니다"}},
+            )
+            return
+
         try:
             body = json.loads(raw)
         except json.JSONDecodeError:
@@ -448,11 +509,25 @@ def create_app(
                 {
                     "type": "http.response.start",
                     "status": upstream.status_code,
-                    "headers": [(b"content-type", b"application/octet-stream")],
+                    "headers": [
+                        (
+                            b"content-type",
+                            upstream.headers.get("content-type", "application/octet-stream").encode(),
+                        ),
+                        *_forwarded_headers(upstream),
+                    ],
                 }
             )
             await send({"type": "http.response.body", "body": upstream.content})
             return
+
+        # 업스트림이 내려보낸 추론 서명을 기억해 둔다. 다음 턴에 클라이언트가
+        # 그 블록을 되돌려보낼 때, 그것이 진짜 추론인지 판정하는 유일한 근거다.
+        for block in payload.get("content", []) if isinstance(payload, dict) else []:
+            if isinstance(block, dict):
+                서명 = block.get("signature") or block.get("data")
+                if isinstance(서명, str):
+                    session.remember_signature(서명)
 
         restored = protocol.restore(payload, session)
 
@@ -460,6 +535,8 @@ def create_app(
             await _send_sse(send, protocol.sse(restored))
             return
 
-        await _send_json(send, upstream.status_code, restored)
+        await _send_json(
+            send, upstream.status_code, restored, _forwarded_headers(upstream)
+        )
 
     return app

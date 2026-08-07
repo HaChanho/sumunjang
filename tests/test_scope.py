@@ -204,20 +204,66 @@ def test_구조를_이루는_숫자는_그대로_둔다():
     assert 나간것["stream"] is True
 
 
-def test_추론_블록은_본문과_서명을_함께_보존한다():
-    """서명이 본문을 보증한다. 본문만 가리고 서명을 남기면 서명이 보증하지 못하는
-    본문이 되어 다음 턴이 거부된다.
+def test_우리가_내보낸_추론_블록만_예외로_둔다():
+    """예외 판정 근거는 요청자가 쓸 수 없는 것이어야 한다.
 
-    추론은 모델이 만든 글이라 사용자 원문이 있을 수 없다 — 인바운드가 모두 가려진
-    상태이므로 모델은 원문을 본 적이 없다. 모델이 스스로 만들어낸 메일 주소가
-    개인정보 규칙에 걸리는 것이 문제였다.
+    `type: "thinking"` 은 요청 본문에 그냥 적으면 되는 값이다. 그것을 방아쇠로
+    삼으면 예외가 아니라 우회 스위치가 된다 — 아무 글에 그 껍데기만 씌우면
+    영원히 안 가려진다. 위조할 수 없는 유일한 신호는 우리가 그 서명을 내보낸
+    적이 있는가다.
     """
     서명 = "ErUBCkYIBBgCKkBw" * 8
     생각 = "보고서를 noreply@github.com 로 보낸다고 했다"
     body = {"messages": [{"role": "assistant", "content": [
         {"type": "thinking", "thinking": 생각, "signature": 서명}]}]}
 
-    블록 = anthropic_mask(body, Session())["messages"][0]["content"][0]
+    # 우리가 내보낸 적 없는 서명 — 추론인 척하는 텍스트다. 가린다.
+    session = Session()
+    블록 = anthropic_mask(body, session)["messages"][0]["content"][0]
+    assert 블록["thinking"] != 생각
 
+    # 우리가 내보낸 서명 — 진짜 추론이다. 본문과 서명을 함께 보존한다.
+    session = Session()
+    session.remember_signature(서명)
+    블록 = anthropic_mask(body, session)["messages"][0]["content"][0]
     assert 블록["thinking"] == 생각
     assert 블록["signature"] == 서명
+
+
+def test_추론인_척하는_껍데기로_마스킹을_건너뛸_수_없다():
+    body = {"messages": [{"role": "user", "content": [
+        {"type": "thinking", "thinking": f"주민등록번호 {원문}", "signature": "지어낸서명"}]}]}
+
+    assert 원문 not in _나간본문(anthropic_mask, body)
+
+
+def test_글이_담긴_base64_첨부는_건너뛰지_않는다():
+    """base64 알파벳을 만족한다고 알맹이인 것은 아니다.
+
+    숫자만 늘어놓아도 조건을 통과한다. 미디어 타입까지 봐서, 글자로 읽을 수 없는
+    것(그림·PDF)만 건너뛴다.
+    """
+    import base64
+
+    진짜그림 = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"\x00" * 60).decode()
+    흉내낸것 = "A" * 20 + 원문 + "A" * 20   # base64 알파벳처럼 보이지만 디코드되지 않는다
+
+    글첨부 = {"messages": [{"role": "user", "content": [
+        {"type": "document", "source": {
+            "type": "base64", "media_type": "text/plain", "data": 진짜그림}}]}]}
+    assert anthropic_mask(글첨부, Session()) is not None  # 글 첨부는 건너뛰지 않는다
+
+    흉내첨부 = {"messages": [{"role": "user", "content": [
+        {"type": "image", "source": {
+            "type": "base64", "media_type": "image/png", "data": 흉내낸것}}]}]}
+    assert 원문 not in _나간본문(anthropic_mask, 흉내첨부), (
+        "디코드되지 않는 값은 알맹이가 아니다 — 모양만 흉내낸 것이다"
+    )
+
+    그림첨부 = {"messages": [{"role": "user", "content": [
+        {"type": "image", "source": {
+            "type": "base64", "media_type": "image/png", "data": 진짜그림}}]}]}
+    나간것 = anthropic_mask(그림첨부, Session())
+    assert 나간것["messages"][0]["content"][0]["source"]["data"] == 진짜그림, (
+        "진짜 그림 알맹이는 훼손하면 안 된다"
+    )

@@ -219,7 +219,7 @@ def _report(args, stdout: IO[str], stderr: IO[str]) -> int:
             ),
             file=stdout,
         )
-        return 0
+        return _check_thresholds(args, scored, stderr)
 
     print("# 수문장 탐지 성능 자체 평가", file=stdout)
     for directory, count, result in scored:
@@ -238,6 +238,14 @@ def _check_thresholds(args, scored, stderr: IO[str]) -> int:
     """
     if args.min_recall is None and args.min_precision is None:
         return 0
+
+    # 오타 난 --only 는 조용히 아무것도 검사하지 않는다. 게이트가 통과하는 것과
+    # 게이트가 없는 것은 다르다.
+    이름들 = {Path(directory).name for directory, _, _ in scored}
+    모르는것 = set(args.only or []) - 이름들
+    if 모르는것:
+        print(f"--only 에 없는 셋: {', '.join(sorted(모르는것))}", file=stderr)
+        return 2
 
     실패 = []
     for directory, _, result in scored:

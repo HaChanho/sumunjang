@@ -396,3 +396,23 @@ def test_범주에_잡히지_않는_보이지_않는_문자도_막는다():
     ):
         text = f"고객 900101-123{문자}4568 확인"
         assert [f for f in detect(text) if f.category == "RRN"], f"{이름} 으로 우회됨"
+
+
+def test_결합_기호로_값을_쪼갤_수_없다():
+    """숫자에는 결합형이 없어 NFC 가 합치지 못한 기호가 그대로 남는다.
+
+    남은 기호가 숫자열을 쪼개 탐지를 통째로 빠져나가거나, 이름에서는 "김수́현" 이
+    "[이름_1]́현" 으로 반쯤 남는 부분 유출을 만들었다. 세션 초반에 고친 겹침
+    부분유출과 같은 부류가 정규화 계층에서 재발한 것이다.
+    """
+    assert [f for f in detect("900101-1́234568") if f.category == "RRN"]
+    assert [f for f in detect("880312-1⃣068011") if f.category == "RRN"]
+
+
+def test_결합_기호가_끼어든_이름이_반쯤_남지_않는다():
+    from sumunjang.mask import Session, mask
+
+    masked = mask("성명: 김수́현", Session())
+
+    assert "현" not in masked
+    assert "수" not in masked

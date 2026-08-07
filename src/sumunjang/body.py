@@ -11,71 +11,113 @@
 그래서 뒤집는다. **본문의 모든 값을 가리고, 가리면 안 되는 자리만 예외로 둔다.**
 새 API 필드가 생겨도 자동으로 보호된다.
 
-## 예외를 판정하는 법 — 얕은 신호를 믿지 않는다
+## 예외를 판정하는 법 — 요청자가 쓸 수 있는 신호는 근거가 아니다
 
-예외를 키 이름이나 값 접두사만으로 판정하다 세 번 뚫렸다.
+예외 판정 근거를 네 번 갈아엎었고, 매번 같은 이유로 뚫렸다.
 
-  - `signature` 라는 키면 어디서든 통과했다 → `metadata.audit.signature` 로 유출
-  - `type: "base64"` 라고 **적어 두기만** 하면 무엇이든 통과했다 → 평문 통과
-  - `data:` 로 시작하고 `;base64,` 를 포함하면 통과했다 → 아무 글 앞에 그 접두사만
-    붙이면 영원히 안 가려졌다
+  - `signature` 라는 **키 이름**이면 어디서든 통과 → metadata.audit.signature 로 유출
+  - `type: "base64"` 라고 **적어 두기만** 하면 통과 → 평문 통과
+  - `data:` 로 **시작하기만** 하면 통과 → 아무 글에 접두사만 붙이면 영원히 안 가려짐
+  - `type: "thinking"` 이라고 **적어 두기만** 하면 통과 → 추론인 척하는 껍데기로 유출
 
-셋의 공통점은 **공격자가 그 신호를 직접 쓸 수 있다**는 것이다. 그러면 그것은 예외
-조건이 아니라 우회 스위치다.
+넷의 공통점은 하나다. **판정 근거를 요청자가 본문에 직접 쓸 수 있었다.** 그러면
+그것은 예외 조건이 아니라 우회 스위치다.
 
-그래서 예외는 두 가지를 함께 본다.
+그래서 근거를 요청자 바깥에서 찾는다.
 
-  **자리** — 부모 블록이 정말 그 블록인가 (`type` 이 `thinking` 인 곳의 `signature`)
-  **값**  — 정말 그 모양인가 (base64 알파벳으로만 이루어졌는가)
+  **출처** — 우리가 그 값을 내보낸 적이 있는가. 추론 블록은 서명을 대조한다.
+            요청자는 우리가 내보낸 적 없는 서명을 만들어낼 수 없다.
+  **값**  — 정말 그 모양이면서 글자로 읽을 수 없는 것인가. base64 첨부는 알파벳
+            조건에 더해 미디어 타입이 그림·소리·PDF 인 것만 건너뛴다.
 
-둘 다 맞아야 건너뛴다. 하나라도 어긋나면 가린다.
+둘 중 하나도 아니면 가린다.
 """
 
 from __future__ import annotations
 
+import base64
+import binascii
 import re
 from typing import Any
 
 from .mask import Session, mask
 
-# base64 알파벳(표준·URL 안전)과 패딩만으로 이루어졌는지. `type: base64` 라고 적어
-# 두기만 하면 평문이 통과하던 구멍을 막는다. 짧은 값은 우연히 통과할 수 있으므로
-# 길이 하한을 둔다 — 짧으면 가려도 손해가 없다.
-_BASE64_ONLY = re.compile(r"[A-Za-z0-9+/=_-]{32,}\Z")
+# 글자로 읽을 수 없는 첨부의 미디어 타입. 여기에 해당해야만 알맹이를 건너뛴다.
+_BINARY_MEDIA = ("image/", "audio/", "video/", "application/pdf")
+
+# 짧은 값은 우연히 base64 로 읽힐 수 있다. 짧으면 가려도 손해가 없으므로 하한을 둔다.
+_MIN_ATTACHMENT_BYTES = 32
 
 # data: URI 중 실제로 base64 로 인코딩된 것. 형태를 통째로 확인한다. 접두사만 보면
 # `data:text/plain;base64, 주민번호 …` 가 통과한다.
-_BASE64_DATA_URI = re.compile(r"data:[\w.+/-]*(?:;[\w-]+=[\w-]+)*;base64,[A-Za-z0-9+/=]+\Z")
+_BASE64_DATA_URI = re.compile(
+    r"data:(?P<media>[\w.+/-]*)(?:;[\w-]+=[\w-]+)*;base64,(?P<payload>[A-Za-z0-9+/=]+)\Z"
+)
 
 
-def _is_opaque(key: str, value: str, parent: dict) -> bool:
+
+def _opaque_base64(value: str, media_type: str) -> bool:
+    """이 값을 base64 첨부의 알맹이로 보아 건너뛸 것인가.
+
+    **모양을 흉내내는 정규식으로는 판정할 수 없다.** 한때 base64 알파벳을
+    정규식으로 확인했는데, URL 안전 알파벳이 하이픈과 밑줄을 포함하는 바람에
+    `880312-1068011-880312-1068011-…` 처럼 하이픈으로 끊어 쓴 한국 식별자가
+    전부 "base64 모양" 으로 판정됐다. 흉내낼 수 있는 조건은 조건이 아니다.
+
+    그래서 실제로 디코드해 본다. 덤으로 미디어 타입도 본다 — 글이 담긴
+    첨부(text/*, application/json …)는 건너뛰지 않고 그대로 검사한다.
+    건너뛰는 것은 그림·소리·PDF 처럼 글자로 읽을 수 없는 것뿐이다.
+    """
+    if not media_type.startswith(_BINARY_MEDIA):
+        return False
+    try:
+        풀린것 = base64.b64decode(value, validate=True)
+    except (binascii.Error, ValueError):
+        return False
+    return len(풀린것) >= _MIN_ATTACHMENT_BYTES
+
+
+def _is_opaque(key: str, value: str, parent: dict, session: Session) -> bool:
     """이 값을 가리지 않고 그대로 두어야 하는가.
 
-    자리와 값을 함께 본다. 어느 한쪽만 보면 우회 스위치가 된다.
+    **판정 근거는 요청자가 쓸 수 없는 것이어야 한다.** 자리(부모의 type)만 보다
+    세 번 뚫렸다. `type: "thinking"` 도 `type: "base64"` 도 요청 본문에 그냥
+    적으면 되는 값이라, 그것을 방아쇠로 삼으면 예외가 아니라 우회 스위치가 된다.
+
+    그래서 둘 중 하나여야 한다.
+
+      **출처** — 우리가 그 값을 내보낸 적이 있는가 (추론 서명)
+      **값**  — 정말 그 모양이면서, 글자로 읽을 수 없는 것인가 (base64 첨부)
     """
     block_type = parent.get("type")
 
-    # 추론 블록은 통째로 둔다. 모델이 만든 글이라 사용자 원문이 있을 수 없고
-    # (인바운드가 모두 가려진 상태이므로 모델은 원문을 본 적이 없다), 서명이
-    # 본문을 보증하므로 한 글자만 바꿔도 다음 턴이 거부된다. 본문을 가리면서
-    # 서명만 남기면 서명이 보증하지 못하는 본문이 되어 오히려 요청이 깨진다.
+    # 추론 블록. 서명을 우리가 내보낸 적이 있어야만 예외다. 요청자가 지어낸
+    # 서명이면 그 블록은 추론이 아니라 그냥 텍스트이므로 가린다.
+    #
+    # 진짜 추론 블록을 예외로 두는 이유는 둘이다. 모델이 만든 글이라 사용자
+    # 원문이 있을 수 없고(인바운드가 모두 가려진 상태라 모델은 원문을 본 적이
+    # 없다), 서명이 본문을 보증하므로 본문만 가리면 서명이 보증하지 못하는
+    # 본문이 되어 다음 턴이 거부된다.
     if block_type in ("thinking", "redacted_thinking") and key in (
         "thinking",
         "signature",
         "data",
     ):
-        return True
+        서명 = parent.get("signature") or parent.get("data") or ""
+        return isinstance(서명, str) and session.emitted_signature(서명)
 
-    # base64 첨부의 알맹이. 형제 필드가 base64 라고 **적혀 있기만** 한 것으로는
-    # 부족하고, 값이 실제로 base64 여야 한다.
     if key == "data" and block_type == "base64":
-        return bool(_BASE64_ONLY.match(value))
+        return _opaque_base64(value, str(parent.get("media_type", "")))
 
-    # data: URI 는 주소가 아니라 알맹이다. 다만 base64 로 인코딩된 것만이다 —
-    # `data:image/svg+xml,<svg>…</svg>` 는 평문이고 그 안에 글자가 들어간다.
-    # 자리도 함께 본다. 첨부를 가리키는 자리가 아니면 그냥 텍스트다.
-    if key in ("url", "file_data") and _BASE64_DATA_URI.match(value):
-        return True
+    # data: URI 는 주소가 아니라 알맹이다. 부모의 type 을 보지 않는 이유는 OpenAI
+    # 모양(`{"image_url": {"url": "data:…"}}`)에서 url 의 부모에 type 이 없기
+    # 때문이다. 대신 값 쪽 조건이 무겁다 — 실제로 디코드돼야 하고 미디어 타입이
+    # 글자로 읽을 수 없는 것이어야 한다. 요청자가 이 둘을 모두 만족시키려면
+    # 개인정보를 제대로 base64 로 인코딩해 그림이라고 주장해야 하는데, 그것은
+    # 이미 선언한 한계(첨부 파일 안은 보지 않는다)와 같은 자리다.
+    if key in ("url", "file_data"):
+        매치 = _BASE64_DATA_URI.match(value)
+        return bool(매치) and _opaque_base64(매치.group("payload"), 매치.group("media"))
 
     return False
 
@@ -99,7 +141,7 @@ def mask_everything(node: Any, session: Session, parent: dict | None = None, key
         return [mask_everything(item, session, parent, key) for item in node]
 
     if isinstance(node, str):
-        if parent is not None and _is_opaque(key, node, parent):
+        if parent is not None and _is_opaque(key, node, parent, session):
             return node
         return mask(node, session)
 
