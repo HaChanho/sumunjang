@@ -53,6 +53,8 @@ class Session:
         self._placeholder_by_value: OrderedDict[tuple[str, str], str] = OrderedDict()
         self._value_by_placeholder: dict[str, str] = {}
         self._counts: dict[str, int] = {}
+        # known_spans() 가 쓰는 (패턴, 값→카테고리) 캐시. 매핑이 바뀌면 버린다.
+        self._known: tuple[re.Pattern[str], dict[str, str]] | None = None
 
     def placeholder_for(self, category: str, value: str) -> str:
         """같은 값에는 언제나 같은 이름을 준다 — 모델이 문맥을 잃지 않도록."""
@@ -69,6 +71,7 @@ class Session:
         placeholder = f"[{label}_{self._counts[category]}]"
         self._placeholder_by_value[key] = placeholder
         self._value_by_placeholder[placeholder] = value
+        self._known = None
         self._evict_overflow()
         return placeholder
 
@@ -77,9 +80,46 @@ class Session:
             _, evicted = self._placeholder_by_value.popitem(last=False)
             # 두 사전을 함께 비운다. 한쪽만 지우면 원문이 계속 메모리에 남는다.
             self._value_by_placeholder.pop(evicted, None)
+            self._known = None
 
     def original_for(self, placeholder: str) -> str | None:
         return self._value_by_placeholder.get(placeholder)
+
+    def known_spans(self, text: str) -> list[tuple[str, int, int]]:
+        """이미 가린 값이 이 텍스트에 다시 나타난 자리를 (카테고리, 시작, 끝)로.
+
+        마스킹은 문맥에 의존하지만(앵커) 복원은 문맥과 무관하다. 그래서 복원이
+        값을 탐지기가 알아볼 수 없는 문맥으로 옮겨 놓는다 — 모델이 가명 표시를
+        설명 대상으로 언급하면 그 자리에 원문이 놓이고, 다음 턴에 대화 기록이
+        다시 전송될 때 앵커가 없어 잡히지 않는다. 실왕복에서 이름이 실제로
+        업스트림에 두 번 나갔다.
+
+        세션은 자기가 가린 값을 알고 있다. 그것으로 고리를 닫는다.
+        한 번 가린 값은 문맥이 바뀌어도 계속 가린다.
+        """
+        if not self._value_by_placeholder:
+            return []
+
+        if self._known is None:
+            category_of = {value: category for (category, value) in self._placeholder_by_value}
+            # 긴 값을 먼저 둔다. 짧은 값이 긴 값의 앞부분을 먼저 먹으면 구간이
+            # 잘린다 — 겹침 병합이 뒤에서 이어 붙이긴 하지만 라벨이 어긋난다.
+            #
+            # 앞쪽 경계만 본다. 한국어는 이름 뒤에 조사·직함이 그대로 붙으므로
+            # ("김수현씨", "김수현 책임") 뒤쪽까지 막으면 그 형태를 놓친다.
+            # 대가로 두 글자 이름이 다른 낱말의 앞부분과 겹치면 과도하게 가려질
+            # 수 있으나, 과도한 마스킹은 유출보다 안전한 쪽이다.
+            values = sorted(category_of, key=len, reverse=True)
+            self._known = (
+                re.compile("|".join(f"(?<![가-힣])({re.escape(v)})" for v in values)),
+                category_of,
+            )
+
+        pattern, category_of = self._known
+        return [
+            (category_of[match.group()], match.start(), match.end())
+            for match in pattern.finditer(text)
+        ]
 
     def entries(self) -> list[tuple[str, str]]:
         """가린 항목을 (카테고리, placeholder) 순서대로. 원문은 내보내지 않는다."""
@@ -167,7 +207,10 @@ def _merge_overlapping(findings: list[Finding]) -> list[tuple[str, int, int]]:
 
 def mask(text: str, session: Session) -> str:
     """탐지된 개인정보를 placeholder로 바꾼 텍스트를 돌려준다."""
-    findings = detect(text)
+    # 규칙이 찾은 것과 세션이 아는 것을 함께 다룬다. 둘이 겹치면 병합 규칙이
+    # 합집합으로 처리하므로 중복 치환이 생기지 않는다.
+    known = (Finding(c, s, e) for c, s, e in session.known_spans(text))
+    findings = sorted(set(detect(text)) | set(known), key=lambda f: (f.start, f.end))
     if not findings:
         return text
 
