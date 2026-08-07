@@ -222,12 +222,19 @@ def test_우리가_내보낸_추론_블록만_예외로_둔다():
     블록 = anthropic_mask(body, session)["messages"][0]["content"][0]
     assert 블록["thinking"] != 생각
 
-    # 우리가 내보낸 서명 — 진짜 추론이다. 본문과 서명을 함께 보존한다.
+    # 우리가 내보낸 짝 — 진짜 추론이다. 본문과 서명을 함께 보존한다.
     session = Session()
-    session.remember_signature(서명)
+    session.remember_thinking(서명, 생각)
     블록 = anthropic_mask(body, session)["messages"][0]["content"][0]
     assert 블록["thinking"] == 생각
     assert 블록["signature"] == 서명
+
+    # 진짜 서명에 본문만 갈아 끼운 것 — 서명만 대조하면 통과하던 자리다.
+    session = Session()
+    session.remember_thinking(서명, 생각)
+    갈아낀것 = {"messages": [{"role": "assistant", "content": [
+        {"type": "thinking", "thinking": f"주민등록번호 {원문}", "signature": 서명}]}]}
+    assert 원문 not in _나간본문(anthropic_mask, 갈아낀것)
 
 
 def test_추론인_척하는_껍데기로_마스킹을_건너뛸_수_없다():

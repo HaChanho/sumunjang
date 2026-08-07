@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 
-from .detect import Finding, detect
+from .detect import Finding, find_in_normalized, normalize
 
 # placeholder에 쓰는 한국어 라벨. 모델이 "가려진 값"임을 이해하고 문맥을 유지하도록
 # 사람이 읽을 수 있는 이름을 쓴다.
@@ -37,6 +37,10 @@ _PLACEHOLDER_PATTERN = re.compile(r"\[(?:" + "|".join(_LABELS.values()) + r")_\d
 # 전송되므로 퇴출은 과거를 지우는 것이 아니라 보호를 푸는 것이었다. 상한에
 # 닿으면 버리는 대신 요청을 거부한다. 메모리도 상한이고 유출도 없다.
 _DEFAULT_CAPACITY = 10_000
+
+# 값 하나가 담을 수 있는 길이. 개수만 세면 거대한 값 하나로 메모리를 밀어낼 수
+# 있다. 이 길이를 넘는 개인정보는 현실에 없다.
+_MAX_VALUE_LENGTH = 4_096
 
 
 class SessionFull(Exception):
@@ -68,13 +72,18 @@ class Session:
         self._by_first: dict[str, list[str]] = {}
         # 우리가 업스트림 응답에서 실제로 내보낸 추론 서명들.
         # 예외를 요청자의 선언이 아니라 출처로 판정하기 위한 기억이다.
-        self._emitted_signatures: set[str] = set()
+        self._emitted: dict[str, str] = {}
 
     def placeholder_for(self, category: str, value: str) -> str:
         """같은 값에는 언제나 같은 이름을 준다 — 모델이 문맥을 잃지 않도록."""
         key = (category, value)
         if key in self._placeholder_by_value:
             return self._placeholder_by_value[key]
+
+        if len(value) > _MAX_VALUE_LENGTH:
+            raise SessionFull(
+                f"가릴 값이 {_MAX_VALUE_LENGTH}자를 넘습니다. 개인정보로 보기 어렵습니다."
+            )
 
         if len(self._placeholder_by_value) >= self._capacity:
             raise SessionFull(
@@ -94,18 +103,22 @@ class Session:
         묶음.sort(key=len, reverse=True)
         return placeholder
 
-    def remember_signature(self, signature: str) -> None:
-        """업스트림이 내려보낸 추론 서명을 기억한다.
+    def remember_thinking(self, signature: str, body: str) -> None:
+        """업스트림이 내려보낸 추론 블록을 서명과 본문 **짝으로** 기억한다.
 
         추론 블록을 마스킹에서 빼주려면 그것이 진짜인지 알아야 하는데, 본문에
         적힌 `type: "thinking"` 은 요청자가 그냥 쓰는 값이라 근거가 되지 못한다.
-        위조할 수 없는 유일한 신호는 **우리가 그 서명을 내보낸 적이 있는가** 다.
+        위조할 수 없는 신호는 우리가 그 블록을 내보낸 적이 있는가다.
+
+        서명만 기억했더니 그것으로도 부족했다 — 진짜 서명을 그대로 두고 본문만
+        개인정보로 갈아 끼우면 통과했다. 업스트림이 나중에 서명 불일치로 거부해도
+        원문은 이미 나간 뒤다. 짝으로 기억해 본문까지 대조한다.
         """
         if signature:
-            self._emitted_signatures.add(signature)
+            self._emitted[signature] = body
 
-    def emitted_signature(self, signature: str) -> bool:
-        return signature in self._emitted_signatures
+    def emitted_thinking(self, signature: str, body: str) -> bool:
+        return self._emitted.get(signature) == body
 
     def original_for(self, placeholder: str) -> str | None:
         return self._value_by_placeholder.get(placeholder)
@@ -263,11 +276,18 @@ def _merge_overlapping(findings: list[Finding]) -> list[tuple[str, int, int]]:
 
 
 def mask(text: str, session: Session) -> str:
-    """탐지된 개인정보를 placeholder로 바꾼 텍스트를 돌려준다."""
-    # 규칙이 찾은 것과 세션이 아는 것을 함께 다룬다. 둘이 겹치면 병합 규칙이
-    # 합집합으로 처리하므로 중복 치환이 생기지 않는다.
-    known = (Finding(c, s, e) for c, s, e in session.known_spans(text))
-    findings = sorted(set(detect(text)) | set(known), key=lambda f: (f.start, f.end))
+    """탐지된 개인정보를 placeholder로 바꾼 텍스트를 돌려준다.
+
+    정규화를 한 번만 하고 규칙 탐지와 세션 재탐색이 **같은 텍스트**를 보게 한다.
+    세션 재탐색이 원문을 그대로 훑던 동안, 이미 가린 이름에 제로폭 하나만
+    끼우면 빠져나갈 수 있었다 — 두 경로가 다른 것을 보면 한쪽만 뚫린다.
+    """
+    scan_text, starts, ends = normalize(text)
+    구간 = set(find_in_normalized(scan_text)) | set(session.known_spans(scan_text))
+    findings = sorted(
+        (Finding(category, starts[start], ends[end - 1]) for category, start, end in 구간),
+        key=lambda f: (f.start, f.end),
+    )
     if not findings:
         return text
 

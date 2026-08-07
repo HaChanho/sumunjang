@@ -456,26 +456,57 @@ _RULES = (
 CATEGORIES = tuple(category for category, _, _ in _RULES)
 
 
+def _scan(pattern: re.Pattern[str], validator, text: str):
+    """패턴을 훑되, 검증기가 거부하면 **시작점 다음 칸부터** 다시 찾는다.
+
+    finditer 는 매치 끝에서 다음 탐색을 시작하므로, 검증기가 거부한 후보가
+    그 안에 든 유효한 값을 통째로 삼킨다. `ref 000-010-1234-5678` 에서
+    무효 후보 `000-010-1234` 가 유효한 `010-1234-5678` 의 시작점을 먹어
+    전화번호가 통째로 빠져나갔다.
+
+    검증기로 오탐을 거르는 설계가 미탐지를 만들고 있었던 셈이다.
+    """
+    group = "value" if "value" in pattern.groupindex else 0
+    position = 0
+    while position <= len(text):
+        match = pattern.search(text, position)
+        if match is None:
+            return
+        if validator is None or validator(match.group(group)):
+            yield match.start(group), match.end(group)
+            # 빈 매치에서 제자리걸음 하지 않도록 최소 한 칸은 전진한다.
+            position = max(match.end(), match.start() + 1)
+        else:
+            position = match.start() + 1
+
+
+def find_in_normalized(scan_text: str) -> list[tuple[str, int, int]]:
+    """이미 정규화된 텍스트에서 규칙 탐지 결과를 (카테고리, 시작, 끝)로.
+
+    마스킹 계층이 정규화를 한 번만 하고 규칙 탐지와 세션 재탐색에 함께 쓰도록
+    분리해 둔다. 두 경로가 같은 텍스트를 보지 않으면 한쪽만 뚫린다 — 세션
+    재탐색이 원문을 그대로 훑던 동안, 이미 가린 이름에 제로폭을 끼우는 것만으로
+    빠져나갈 수 있었다.
+    """
+    found: list[tuple[str, int, int]] = []
+    for category, pattern, validator in _RULES:
+        for start, end in _scan(pattern, validator, scan_text):
+            found.append((category, start, end))
+    return found
+
+
+def normalize(text: str) -> tuple[str, list[int], list[int]]:
+    """탐지용 텍스트와 원문 좌표 지도. 마스킹 계층이 함께 쓴다."""
+    return _normalize(text)
+
+
 def detect(text: str) -> list[Finding]:
     """텍스트에서 한국 개인정보·시크릿을 찾아 원문 좌표로 돌려준다."""
     scan_text, starts, ends = _normalize(text)
-    findings = []
-
-    for category, pattern, validator in _RULES:
-        # 앵커 규칙은 `value` 그룹만 가린다. 앵커("성명:")는 문맥이므로 남겨야
-        # 모델이 가려진 자리가 무엇이었는지 알 수 있다.
-        group = "value" if "value" in pattern.groupindex else 0
-        for match in pattern.finditer(scan_text):
-            if validator is not None and not validator(match.group(group)):
-                continue
-            findings.append(
-                Finding(
-                    category=category,
-                    start=starts[match.start(group)],
-                    end=ends[match.end(group) - 1],
-                )
-            )
-
+    findings = [
+        Finding(category=category, start=starts[start], end=ends[end - 1])
+        for category, start, end in find_in_normalized(scan_text)
+    ]
     # 같은 값을 두 규칙이 잡는 일이 있다. "rrn=8803121000068" 은 형태 규칙과
     # 앵커 규칙에 모두 걸린다. Finding 은 (카테고리, 좌표)로 정해지는 값이므로
     # 중복은 지운다 — 그냥 두면 "가린 항목 N건" 이 부풀고 scan 출력이 겹친다.

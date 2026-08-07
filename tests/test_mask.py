@@ -244,3 +244,28 @@ def test_큰_세션에서도_큰_본문이_실용적인_시간에_끝난다():
     mask(본문, session)
 
     assert time.perf_counter() - 시작 < 1.0
+
+
+def test_세션이_아는_값도_우회_표기로_빠져나갈_수_없다():
+    """탐지는 정규화된 텍스트를 보는데 세션 재탐색이 원문을 그대로 훑었다.
+
+    두 경로가 같은 것을 보지 않으면 한쪽만 뚫린다 — 이미 가린 이름에 제로폭
+    하나만 끼우면 빠져나갔다.
+    """
+    import unicodedata
+
+    session = Session()
+    mask("담당: 김수현", session)
+
+    for 변형 in ("김​수현", "김수­현", unicodedata.normalize("NFD", "김수현")):
+        assert "수현" not in mask(f"이름은 {변형} 입니다", session), f"우회됨: {변형!r}"
+
+
+def test_지나치게_긴_값은_세션에_담지_않는다():
+    """개수만 세면 거대한 값 하나로 메모리를 밀어낼 수 있다."""
+    from sumunjang.mask import _MAX_VALUE_LENGTH
+
+    session = Session()
+
+    with pytest.raises(SessionFull):
+        session.placeholder_for("EMAIL", "a" * (_MAX_VALUE_LENGTH + 1))

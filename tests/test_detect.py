@@ -416,3 +416,21 @@ def test_결합_기호가_끼어든_이름이_반쯤_남지_않는다():
 
     assert "현" not in masked
     assert "수" not in masked
+
+
+def test_검증기가_거부한_후보가_뒤의_유효한_값을_삼키지_않는다():
+    """finditer 는 매치 끝에서 다음 탐색을 시작한다.
+
+    검증기가 거부한 후보 안에 유효한 값이 들어 있으면 그 값의 시작점이 통째로
+    먹힌다. `ref 000-010-1234-5678` 에서 무효 후보 `000-010-1234` 가 유효한
+    `010-1234-5678` 을 가려 전화번호가 빠져나갔다. 검증기로 오탐을 거르는 설계가
+    미탐지를 만들고 있었던 셈이다.
+    """
+    text = "ref 000-010-1234-5678"
+    phones = [f for f in detect(text) if f.category == "PHONE"]
+    assert len(phones) == 1
+    assert text[phones[0].start : phones[0].end] == "010-1234-5678"
+
+    text = "id 0000-4242-4242-4242-4242"
+    cards = [f for f in detect(text) if f.category == "CARD"]
+    assert len(cards) == 1

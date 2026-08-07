@@ -103,8 +103,13 @@ def _is_opaque(key: str, value: str, parent: dict, session: Session) -> bool:
         "signature",
         "data",
     ):
-        서명 = parent.get("signature") or parent.get("data") or ""
-        return isinstance(서명, str) and session.emitted_signature(서명)
+        서명 = parent.get("signature") or ""
+        본문 = parent.get("thinking") or parent.get("data") or ""
+        return (
+            isinstance(서명, str)
+            and isinstance(본문, str)
+            and session.emitted_thinking(서명, 본문)
+        )
 
     if key == "data" and block_type == "base64":
         return _opaque_base64(value, str(parent.get("media_type", "")))

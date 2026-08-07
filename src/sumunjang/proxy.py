@@ -525,9 +525,10 @@ def create_app(
         # 그 블록을 되돌려보낼 때, 그것이 진짜 추론인지 판정하는 유일한 근거다.
         for block in payload.get("content", []) if isinstance(payload, dict) else []:
             if isinstance(block, dict):
-                서명 = block.get("signature") or block.get("data")
-                if isinstance(서명, str):
-                    session.remember_signature(서명)
+                서명 = block.get("signature")
+                본문 = block.get("thinking") or block.get("data")
+                if isinstance(서명, str) and isinstance(본문, str):
+                    session.remember_thinking(서명, 본문)
 
         restored = protocol.restore(payload, session)
 
