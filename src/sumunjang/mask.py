@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import re
-from collections import OrderedDict
 
 from .detect import Finding, detect
 
@@ -33,54 +32,58 @@ _PLACEHOLDER_PATTERN = re.compile(r"\[(?:" + "|".join(_LABELS.values()) + r")_\d
 # 있으므로, 상한이 없으면 그날 오간 모든 개인정보가 원문 그대로 메모리에 쌓인다.
 # 보안 도구가 스스로 개인정보 저장소가 되어서는 안 된다.
 #
-# 하루치 대화에서 서로 다른 개인정보가 만 건을 넘는 일은 드물고, 넘더라도 대가는
-# 미복원이지 유출이 아니다.
+# 상한은 **퇴출선이 아니라 거부선**이다. 처음에는 오래된 것부터 버렸는데, 버린
+# 값은 다음 턴에 다시 가려지지 않아 그대로 유출됐다 — 대화 기록은 매 턴 다시
+# 전송되므로 퇴출은 과거를 지우는 것이 아니라 보호를 푸는 것이었다. 상한에
+# 닿으면 버리는 대신 요청을 거부한다. 메모리도 상한이고 유출도 없다.
 _DEFAULT_CAPACITY = 10_000
+
+
+class SessionFull(Exception):
+    """세션 상한에 닿았다. 요청을 거부해야 한다.
+
+    프록시가 이 예외를 잡아 업스트림 전송 없이 오류를 돌려준다. 서로 다른
+    개인정보 만 건은 현실적으로 닿기 어려운 지점이므로, 닿았다면 프록시를
+    다시 띄워야 할 상황이다.
+    """
 
 
 class Session:
     """한 대화에서 쓰는 마스킹 매핑.
 
     원문 개인정보를 그대로 담고 있으므로 기본은 메모리에만 두고, 담는 양에
-    상한을 둔다. 상한을 넘으면 가장 오래 쓰이지 않은 것부터 버린다.
-
-    버려진 값은 복원되지 않을 뿐 유출되지 않는다 — 화면에 원문 대신 가명 표시가
-    남는다. 잘못된 복원이 미복원보다 위험하다는 원칙과 같은 방향이다.
+    상한을 둔다. 상한에 닿으면 버리지 않고 SessionFull 을 던져 요청을 거부한다 —
+    이유는 _DEFAULT_CAPACITY 주석에 적었다.
     """
 
     def __init__(self, capacity: int = _DEFAULT_CAPACITY) -> None:
         self._capacity = capacity
-        self._placeholder_by_value: OrderedDict[tuple[str, str], str] = OrderedDict()
+        self._placeholder_by_value: dict[tuple[str, str], str] = {}
         self._value_by_placeholder: dict[str, str] = {}
         self._counts: dict[str, int] = {}
-        # known_spans() 가 쓰는 (패턴, 값→카테고리) 캐시. 매핑이 바뀌면 버린다.
-        self._known: tuple[re.Pattern[str], dict[str, str]] | None = None
+        # known_spans() 가 훑는 값→카테고리. 긴 값을 먼저 보아야 짧은 값이
+        # 긴 값의 앞부분을 먼저 먹지 않는다.
+        self._category_of: dict[str, str] = {}
 
     def placeholder_for(self, category: str, value: str) -> str:
         """같은 값에는 언제나 같은 이름을 준다 — 모델이 문맥을 잃지 않도록."""
         key = (category, value)
         if key in self._placeholder_by_value:
-            # 다시 쓰였으므로 뒤로 보낸다. 도구는 매 턴 대화 전체를 다시 보내므로
-            # 앞부분의 개인정보도 매번 다시 가려진다. 등장 순서가 아니라 마지막으로
-            # 쓰인 시점을 기준으로 버려야 긴 대화에서 앞부분이 먼저 사라지지 않는다.
-            self._placeholder_by_value.move_to_end(key)
             return self._placeholder_by_value[key]
+
+        if len(self._placeholder_by_value) >= self._capacity:
+            raise SessionFull(
+                f"세션 상한 {self._capacity}건에 도달했습니다. "
+                "가린 값을 버리면 다음 턴에 다시 가려지지 않아 유출되므로 요청을 거부합니다."
+            )
 
         self._counts[category] = self._counts.get(category, 0) + 1
         label = _LABELS.get(category, category)
         placeholder = f"[{label}_{self._counts[category]}]"
         self._placeholder_by_value[key] = placeholder
         self._value_by_placeholder[placeholder] = value
-        self._known = None
-        self._evict_overflow()
+        self._category_of[value] = category
         return placeholder
-
-    def _evict_overflow(self) -> None:
-        while len(self._placeholder_by_value) > self._capacity:
-            _, evicted = self._placeholder_by_value.popitem(last=False)
-            # 두 사전을 함께 비운다. 한쪽만 지우면 원문이 계속 메모리에 남는다.
-            self._value_by_placeholder.pop(evicted, None)
-            self._known = None
 
     def original_for(self, placeholder: str) -> str | None:
         return self._value_by_placeholder.get(placeholder)
@@ -96,30 +99,42 @@ class Session:
 
         세션은 자기가 가린 값을 알고 있다. 그것으로 고리를 닫는다.
         한 번 가린 값은 문맥이 바뀌어도 계속 가린다.
+
+        찾는 방법은 문자열 탐색이다. 처음에는 값 전부를 하나의 거대한 정규식
+        대안으로 묶었는데, 파이썬 정규식은 대안을 trie 로 접지 않고 **모든 입력
+        위치에서 모든 대안을 차례로 시도한다.** 상한 10,000 에 도달하면 짧은
+        본문 한 번 훑는 데 20초를 넘겼다. 상한값 자체가 프록시를 사용 불능으로
+        만드는 지점을 허용하고 있었던 셈이다. str.find 는 C 수준 탐색이라 같은
+        조건에서 10밀리초대에 끝난다.
         """
-        if not self._value_by_placeholder:
-            return []
+        spans: list[tuple[str, int, int]] = []
 
-        if self._known is None:
-            category_of = {value: category for (category, value) in self._placeholder_by_value}
-            # 긴 값을 먼저 둔다. 짧은 값이 긴 값의 앞부분을 먼저 먹으면 구간이
-            # 잘린다 — 겹침 병합이 뒤에서 이어 붙이긴 하지만 라벨이 어긋난다.
-            #
-            # 앞쪽 경계만 본다. 한국어는 이름 뒤에 조사·직함이 그대로 붙으므로
-            # ("김수현씨", "김수현 책임") 뒤쪽까지 막으면 그 형태를 놓친다.
-            # 대가로 두 글자 이름이 다른 낱말의 앞부분과 겹치면 과도하게 가려질
-            # 수 있으나, 과도한 마스킹은 유출보다 안전한 쪽이다.
-            values = sorted(category_of, key=len, reverse=True)
-            self._known = (
-                re.compile("|".join(f"(?<![가-힣])({re.escape(v)})" for v in values)),
-                category_of,
-            )
+        for value, category in sorted(
+            self._category_of.items(), key=lambda item: len(item[0]), reverse=True
+        ):
+            start = text.find(value)
+            while start != -1:
+                if self._boundary_ok(value, text, start):
+                    spans.append((category, start, start + len(value)))
+                start = text.find(value, start + 1)
 
-        pattern, category_of = self._known
-        return [
-            (category_of[match.group()], match.start(), match.end())
-            for match in pattern.finditer(text)
-        ]
+        return spans
+
+    @staticmethod
+    def _boundary_ok(value: str, text: str, start: int) -> bool:
+        """이 자리에서 값을 가려도 되는가.
+
+        한글 값(이름)만 앞경계를 본다. "박이준" 안의 "이준" 은 다른 사람이므로
+        가리면 안 되기 때문이다. 뒤쪽은 보지 않는다 — 한국어는 이름 뒤에 조사와
+        직함이 그대로 붙는다("김수현씨", "김수현 책임").
+
+        숫자·영문 값에는 앞경계를 적용하지 않는다. 적용했더니 "잔액110-234-567890"
+        처럼 한글이 바로 붙은 자리에서 계좌번호가 가려지지 않았다 — 낱말이
+        망가지는 것을 막으려던 규칙이 유출 방향으로 작동했다.
+        """
+        if start == 0 or not ("가" <= value[0] <= "힣"):
+            return True
+        return not ("가" <= text[start - 1] <= "힣")
 
     def entries(self) -> list[tuple[str, str]]:
         """가린 항목을 (카테고리, placeholder) 순서대로. 원문은 내보내지 않는다."""

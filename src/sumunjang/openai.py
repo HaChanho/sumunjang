@@ -19,25 +19,8 @@ import copy
 import json
 from typing import Any
 
-from .mask import Session, mask, restore
-
-
-def _mask_content(content: Any, session: Session) -> Any:
-    """content 는 문자열이거나 블록 배열이다. 멀티모달 요청에서 배열이 된다."""
-    if isinstance(content, str):
-        return mask(content, session)
-
-    if isinstance(content, list):
-        return [_mask_block(block, session) for block in content]
-
-    return content
-
-
-def _mask_block(block: Any, session: Session) -> Any:
-    if isinstance(block, dict) and isinstance(block.get("text"), str):
-        # 텍스트 블록만 손댄다. image_url 같은 다른 블록은 그대로 둔다.
-        block["text"] = mask(block["text"], session)
-    return block
+from .body import mask_everything
+from .mask import Session, restore
 
 
 def count_masked(body: dict) -> list[str]:
@@ -50,20 +33,12 @@ def count_masked(body: dict) -> list[str]:
 def mask_request(body: dict, session: Session) -> dict:
     """요청 본문의 마스킹 사본을 돌려준다. 원본은 그대로 둔다.
 
-    role 을 가리지 않고 모든 메시지를 훑는다. system·user·assistant·tool 어디에나
-    원문이 실릴 수 있고, 특히 role="tool" 은 파일·명령 실행 결과가 담기는 자리라
-    사용자가 붙여넣지 않아도 원문이 흘러든다.
+    Anthropic 쪽과 같은 함수를 쓴다. 마스킹 범위를 자리 목록이 아니라 "모든
+    문자열" 로 잡으면 프로토콜별로 다를 것이 없어진다 — 자리 목록을 두었을 때
+    OpenAI 쪽에서만 prediction.content·messages[].name·user·file_data 가 샜던
+    것이 바로 목록을 두 벌 관리한 대가였다.
     """
-    masked = copy.deepcopy(body)
-
-    for message in masked.get("messages", []):
-        if isinstance(message, dict):
-            message["content"] = _mask_content(message.get("content"), session)
-
-    # tool_calls[].function.arguments 는 모델이 만든 값이다. 인바운드 텍스트가
-    # 모두 마스킹된 상태라면 모델은 원문을 본 적이 없으므로 원문이 있을 수 없다.
-
-    return masked
+    return mask_everything(copy.deepcopy(body), session)
 
 
 def restore_response(body: dict, session: Session) -> dict:
@@ -80,7 +55,12 @@ def restore_response(body: dict, session: Session) -> dict:
         if not isinstance(choice, dict):
             continue
         message = choice.get("message")
-        if isinstance(message, dict) and isinstance(message.get("content"), str):
-            message["content"] = restore(message["content"], session)
+        if not isinstance(message, dict):
+            continue
+        # content 와 refusal 둘 다 사람이 읽는 자리다. 거절 메시지에만 가명
+        # 표시가 남으면 사용자가 무슨 말인지 알 수 없다.
+        for field in ("content", "refusal"):
+            if isinstance(message.get(field), str):
+                message[field] = restore(message[field], session)
 
     return restored

@@ -66,4 +66,32 @@ def test_골든셋_디렉토리에서_문서를_읽는다(tmp_path):
     assert documents[0].domain == "테스트"
     assert documents[0].doc_id == "sample"
     assert documents[0].text == "고객 900101-1234568 확인"
-    assert documents[0].spans == [Span("RRN", 3, 17)]
+    assert documents[0].spans == [Span("RRN", 3, 17, "sample")]
+
+
+def test_서로_다른_문서의_같은_좌표를_한_건으로_합치지_않는다():
+    """문서 ID 가 없으면 채점이 조용히 틀린다.
+
+    실제로 goldenset-gaps 의 두 문서가 같은 좌표를 가져 정답 18건이 17건으로
+    줄었고, 공표한 재현율이 틀린 수치였다. 더 나쁜 것은 가짜 적중이다 — 문서 B 의
+    순수 오탐이 문서 A 의 정답과 좌표가 같으면 맞힌 것으로 계산되고 오탐은 0으로
+    보고된다.
+    """
+    truth = [Span("RRN", 10, 24, "문서A"), Span("RRN", 10, 24, "문서B")]
+
+    result = score(truth, [Span("RRN", 10, 24, "문서A")])
+
+    assert result["RRN"]["expected"] == 2
+    assert result["RRN"]["hit"] == 1
+    assert result["RRN"]["missed"] == 1
+
+
+def test_다른_문서의_오탐이_적중으로_계산되지_않는다():
+    truth = [Span("RRN", 10, 24, "문서A")]
+    found = [Span("RRN", 10, 24, "문서A"), Span("RRN", 10, 24, "문서B")]
+
+    result = score(truth, found)
+
+    assert result["RRN"]["hit"] == 1
+    assert result["RRN"]["false_positive"] == 1
+    assert result["RRN"]["precision"] == 0.5

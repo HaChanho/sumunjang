@@ -7,14 +7,16 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import sys
 from dataclasses import dataclass
 from typing import Any, Callable
 
 import httpx
 
 from .anthropic import count_masked, mask_request, restore_response
-from .mask import Session
+from .mask import Session, SessionFull
 from .openai import count_masked as openai_count_masked
 from .openai import mask_request as openai_mask_request
 from .openai import restore_response as openai_restore_response
@@ -28,7 +30,10 @@ _SKIP_HEADERS = {b"host", b"content-length", b"connection", b"accept-encoding"}
 # 모르는 경로를 흘려보내면 마스킹을 거치지 않은 본문이 그대로 나간다.
 #
 # 개인정보가 실릴 수 없는 읽기 전용 경로. 본문이 없고 경로에 식별자만 온다.
-_PASSTHROUGH_PREFIX = "/v1/models"
+# 경로 구분자까지 봐야 한다 — startswith 만 쓰면 /v1/models_backup 같은 미지
+# 경로가 통과해 "모르면 차단" 이 무너진다.
+_PASSTHROUGH_EXACT = "/v1/models"
+_PASSTHROUGH_PREFIX = "/v1/models/"
 
 
 async def _read_body(receive) -> bytes:
@@ -189,7 +194,9 @@ async def _send_json(send, status: int, payload: Any) -> None:
     await send({"type": "http.response.body", "body": body})
 
 
-async def _passthrough(send, client, owns_client, upstream_base_url, path, headers) -> None:
+async def _passthrough(
+    send, client, owns_client, upstream_base_url, path, headers, query: str = ""
+) -> None:
     """마스킹 없이 그대로 넘긴다. 본문이 없는 읽기 전용 경로에만 쓴다.
 
     개인정보가 실릴 수 없는 경로여야 한다. 판단이 서지 않는 경로는 여기가 아니라
@@ -197,7 +204,9 @@ async def _passthrough(send, client, owns_client, upstream_base_url, path, heade
     """
     http = client or httpx.AsyncClient(timeout=600.0)
     try:
-        upstream = await http.get(f"{upstream_base_url}{path}", headers=headers)
+        # 쿼리를 버리면 /v1/models?limit=100 의 페이지네이션이 사라진다.
+        target = f"{upstream_base_url}{path}" + (f"?{query}" if query else "")
+        upstream = await http.get(target, headers=headers)
     except httpx.HTTPError as exc:
         await _send_json(
             send,
@@ -262,8 +271,24 @@ def create_app(
     client 를 주입하면 테스트에서 업스트림을 에코 서버로 바꿔 끼울 수 있다.
     on_request 는 요청마다 무엇을 가렸는지 받아보는 콜백이다.
     """
-    session = Session()
+    # 세션을 인증 자격 단위로 나눈다.
+    #
+    # 하나를 공유했더니 다른 대화의 개인정보가 주입됐다. placeholder 이름이
+    # [주민등록번호_1] 처럼 1부터 세는 예측 가능한 값이라, 무관한 응답에 그
+    # 문자열이 들어 있기만 하면 남의 원문으로 복원됐다. 모델이 읽은 웹페이지나
+    # 문서에 그 문자열을 심어 두면 되므로 인젝션 경로이기도 하다.
+    #
+    # 같은 자격의 여러 대화는 여전히 한 세션을 쓴다. 그것은 의도다 — 같은 값에
+    # 같은 이름을 주어야 모델이 문맥을 잃지 않는다.
+    sessions: dict[str, Session] = {}
     owns_client = client is None
+
+    def session_for(headers: dict) -> Session:
+        credential = headers.get("x-api-key") or headers.get("authorization") or ""
+        # 자격증명 자체를 키로 쓰지 않는다. 해시만 남기면 메모리 덤프에
+        # API 키가 남지 않는다.
+        key = hashlib.sha256(credential.encode()).hexdigest()
+        return sessions.setdefault(key, Session())
 
     async def app(scope, receive, send):
         if scope["type"] != "http":
@@ -276,8 +301,11 @@ def create_app(
             if key.lower() not in _SKIP_HEADERS
         }
 
-        if path.startswith(_PASSTHROUGH_PREFIX) and method == "GET":
-            await _passthrough(send, client, owns_client, upstream_base_url, path, headers)
+        if method == "GET" and (path == _PASSTHROUGH_EXACT or path.startswith(_PASSTHROUGH_PREFIX)):
+            query = scope.get("query_string", b"").decode()
+            await _passthrough(
+                send, client, owns_client, upstream_base_url, path, headers, query
+            )
             return
 
         protocol = _PROTOCOLS.get(path)
@@ -288,6 +316,8 @@ def create_app(
                 {"type": "error", "error": {"type": "not_found", "message": "지원하지 않는 경로"}},
             )
             return
+
+        session = session_for(headers)
 
         raw = await _read_body(receive)
         try:
@@ -300,16 +330,31 @@ def create_app(
             )
             return
 
-        wants_stream = bool(body.get("stream"))
         before = len(session)
 
         try:
+            # dict 가 아닌 본문(배열·문자열·null)도 여기서 걸린다. 밖에 두면
+            # AttributeError 가 ASGI 핸들러 밖으로 터져 설계한 응답 대신
+            # 서버의 맨 500 이 나간다.
+            wants_stream = bool(body["stream"]) if "stream" in body else False
             masked = protocol.mask(body, session)
+        except SessionFull as exc:
+            print(f"[수문장] {exc}", file=sys.stderr, flush=True)
+            await _send_json(
+                send,
+                429,
+                {"type": "error", "error": {"type": "session_full", "message": str(exc)}},
+            )
+            return
         except Exception as exc:  # noqa: BLE001 — 무엇이 터지든 나가면 안 된다
             # 보안 도구의 실패 모드는 통과가 아니라 차단이다. 마스킹이 깨졌는데
             # 요청을 그대로 흘려보내면 도구가 있는 편이 없는 편보다 위험해진다.
             # 원문이 담길 수 있으므로 예외 메시지는 응답에 싣지 않는다.
-            print(f"[수문장] 마스킹 실패로 요청을 버렸습니다: {type(exc).__name__}", flush=True)
+            print(
+                f"[수문장] 마스킹 실패로 요청을 버렸습니다: {type(exc).__name__}",
+                file=sys.stderr,
+                flush=True,
+            )
             await _send_json(
                 send,
                 500,
@@ -321,7 +366,10 @@ def create_app(
             return
 
         # 업스트림에는 통짜로 요청한다. 복원을 끝낸 뒤 클라이언트에게만 스트리밍으로 보인다.
+        # stream_options 도 함께 뗀다 — OpenAI 는 stream 이 참일 때만 이 필드를
+        # 허용하므로, 남겨 두면 통짜 요청이 400 으로 거부된다.
         masked.pop("stream", None)
+        masked.pop("stream_options", None)
 
         if on_request is not None:
             # 이번 요청에서 실제로 가려진 자리를 센다. 세션에 이미 등록된 값이라고

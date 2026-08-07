@@ -22,16 +22,32 @@ _RRN_PATTERN = re.compile(r"(?<!\d)\d{6}-?\d{7}(?!\d)")
 # 휴대전화: 010/011/016/017/018/019 + 3~4자리 + 4자리.
 # 구분자는 하이픈·점·공백·없음. 해외 지사에서 오는 +82 표기도 받는다
 # (국가번호를 붙이면 앞의 0 이 빠진다).
+# 리터럴 0·1 대신 \d 를 쓰는 이유는 전각 숫자 때문이다. \d 는 유니코드 십진
+# 숫자를 인식하지만 리터럴 "0" 은 "０" 과 다른 코드포인트라 전각 표기를 놓쳤다.
+# 통신사 식별번호 확인은 패턴이 아니라 _phone_valid 가 한다.
 _PHONE_PATTERN = re.compile(
-    r"(?:(?<!\d)0|\+82[-.\s]?)1[016789][-.\s]?\d{3,4}[-.\s]?\d{4}(?!\d)"
+    r"(?:(?<!\d)\d|\+82[-.\s]?)\d{2}[-.\s]?\d{3,4}[-.\s]?\d{4}(?!\d)"
 )
+
+# 국내 휴대전화 식별번호. 010 이 대부분이고 나머지는 번호이동 전 구번호다.
+_PHONE_PREFIXES = ("010", "011", "016", "017", "018", "019")
 
 # 이메일. 최상위 도메인이 숫자면 이메일이 아니다 —
 # postgresql://app:pw@10.0.3.14 같은 접속 문자열을 걸러내기 위한 조건이다.
-_EMAIL_PATTERN = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)*\.[A-Za-z]{2,}")
+#
+# 수량자에 상한을 둔 것은 스타일이 아니라 방어다. 무한 반복 `[\w.+-]+@` 는 @ 가
+# 없는 긴 입력에서 시작 위치마다 전체를 되짚어 입력 길이의 제곱으로 커진다.
+# base64·JWT·hex 처럼 문자·숫자·하이픈·밑줄만 길게 이어지는 문자열이 전부
+# 해당하고, 도구가 파일 내용을 그대로 실어 보내므로 실제로 닿는 경로다.
+# 로컬파트 64자·라벨 63자는 RFC 5321·1035 의 상한이기도 하다.
+_EMAIL_PATTERN = re.compile(r"[\w.+-]{1,64}@[\w-]{1,63}(?:\.[\w-]{1,63}){0,8}\.[A-Za-z]{2,24}")
 
-# 카드번호: 4자리 4묶음
-_CARD_PATTERN = re.compile(r"(?<!\d)\d{4}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}(?!\d)")
+# 카드번호. 16자리 4묶음이 대부분이지만 Amex 는 15자리(4-6-5), Diners 는
+# 14자리(4-6-4)다. 16자리만 받으면 그 둘이 평문으로 나간다.
+# 자릿수·카드사 대역·Luhn 검사는 _card_valid 가 한다.
+_CARD_PATTERN = re.compile(
+    r"(?<!\d)\d{4}[-\s]?\d{4,6}[-\s]?\d{4,5}(?:[-\s]?\d{1,4})?(?!\d)"
+)
 
 # 사업자등록번호: 3-2-5 형식
 _BRN_PATTERN = re.compile(r"(?<!\d)\d{3}-\d{2}-\d{5}(?!\d)")
@@ -132,7 +148,12 @@ def _anchored(anchors: str, value: str, gap: str = _GAP_LOOSE) -> re.Pattern[str
 
 # 눈에 보이지 않아 탐지를 빠져나가는 문자들. 전각 숫자는 별도 처리가 필요 없다 —
 # 파이썬 정규식의 \d와 int()가 유니코드 십진 숫자를 그대로 인식하기 때문이다.
-_INVISIBLE = "​‌‍⁠﻿"
+_INVISIBLE = (
+    "\u200b\u200c\u200d\u2060\ufeff"      # 제로폭 공백·비접합·접합·단어결합·BOM
+    "\u2061\u2062\u2063\u2064"          # 보이지 않는 함수 적용·곱셈·구분자·덧셈
+    "\u00ad"                             # soft hyphen — 줄바꿈 힌트라 화면에 안 보인다
+    "\u180e\u200e\u200f\u202a\u202b\u202c\u202d\u202e"  # 몽골 모음 구분자, 양방향 제어
+)
 
 
 @dataclass(frozen=True)
@@ -159,6 +180,29 @@ def _strip_invisible(text: str) -> tuple[str, list[int]]:
         chars.append(char)
         origin.append(index)
     return "".join(chars), origin
+
+
+def _digits(text: str) -> str:
+    """숫자만 남기고 전각을 반각으로 맞춘다.
+
+    정규식의 \\d 와 int() 는 유니코드 십진 숫자를 그대로 인식하지만, 검증기가
+    자릿값을 ASCII 문자와 비교하는 자리가 있다(주민등록번호 성별코드 표).
+    거기서 전각이 조용히 빠져나가므로 한 곳에서 맞춰 둔다.
+    """
+    return "".join(str(int(ch)) for ch in text if ch.isdecimal())
+
+
+def _phone_valid(matched: str) -> bool:
+    """통신사 식별번호와 자릿수를 본다.
+
+    패턴에서 리터럴 0·1 을 빼고 \\d 로 바꾼 대신 여기서 확인한다. 리터럴은
+    전각 "０" 을 놓쳤다.
+    """
+    digits = _digits(matched)
+    if "+" in matched:
+        # 국가번호를 붙이면 앞의 0 이 빠진다 (+82-10-... = 010-...)
+        digits = "0" + digits[2:]
+    return digits.startswith(_PHONE_PREFIXES) and len(digits) in (10, 11)
 
 
 def _rrn_checksum_ok(digits: str) -> bool:
@@ -225,7 +269,7 @@ def _rrn_valid(matched: str) -> bool:
     대가를 적어 둔다. 2020.10 이후 발급분은 뒷자리가 임의번호라 검증식을 통과하지
     않으므로, 하이픈 없이 쓰면 잡히지 않는다.
     """
-    digits = matched.replace("-", "")
+    digits = _digits(matched)
     if "-" in matched:
         return _rrn_checksum_ok(digits) or _rrn_birthdate_ok(digits)
     return _rrn_checksum_ok(digits) and _rrn_birthdate_ok(digits)
@@ -243,7 +287,10 @@ def _card_valid(matched: str) -> bool:
     사람이 구분자를 넣어 옮겨적은 형태일 때만 인정한다 — 하이픈 없는 RRN 과
     같은 원칙이다. 증거가 없으면 관문을 더 요구한다.
     """
-    digits = re.sub(r"[-\s]", "", matched)
+    digits = _digits(matched)
+    # 국제 카드번호는 13~19자리지만 실제로 쓰이는 것은 14(Diners)·15(Amex)·16 이다.
+    if len(digits) not in (14, 15, 16):
+        return False
     head = digits[0]
 
     if head == "9":
@@ -259,7 +306,7 @@ def _card_valid(matched: str) -> bool:
 
 
 def _brn_valid(matched: str) -> bool:
-    return _brn_checksum_ok(matched.replace("-", ""))
+    return _brn_checksum_ok(_digits(matched))
 
 
 # 규칙 표: (카테고리, 패턴, 검증기). 검증기가 없으면 패턴만으로 확정한다.
@@ -267,7 +314,7 @@ _RULES = (
     ("RRN", _RRN_PATTERN, _rrn_valid),
     ("BRN", _BRN_PATTERN, _brn_valid),
     ("CARD", _CARD_PATTERN, _card_valid),
-    ("PHONE", _PHONE_PATTERN, None),
+    ("PHONE", _PHONE_PATTERN, _phone_valid),
     ("EMAIL", _EMAIL_PATTERN, None),
     ("SECRET", _SECRET_PATTERN, None),
     # ── 앵커 규칙 ────────────────────────────────────────────────────────

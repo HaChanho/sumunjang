@@ -1,7 +1,9 @@
 """마스킹·복원 계층 테스트."""
 
 from sumunjang.detect import CATEGORIES
-from sumunjang.mask import SEVERITY, Session, mask, restore
+import pytest
+
+from sumunjang.mask import SEVERITY, Session, SessionFull, mask, restore
 
 
 def test_주민등록번호를_placeholder로_치환한다():
@@ -97,56 +99,32 @@ def test_모든_탐지_카테고리가_민감도_표에_들어_있다():
     )
 
 
-def test_세션은_상한을_넘어서면_오래된_것부터_버린다():
-    """프록시는 세션 하나를 프로세스 수명 내내 들고 있다.
+def test_상한에_닿으면_버리지_않고_요청을_거부한다():
+    """상한은 퇴출선이 아니라 거부선이다.
 
-    상한이 없으면 그날 오간 모든 개인정보가 원문 그대로 메모리에 쌓인다.
-    보안 도구가 스스로 개인정보 저장소가 되어서는 안 된다.
-    """
-    session = Session(capacity=3)
-
-    for n in range(5):
-        mask(f"연락처 010-0000-000{n}", session)
-
-    assert len(session) == 3
-
-
-def test_버려진_값은_복원되지_않을_뿐_유출되지_않는다():
-    """퇴출의 대가는 미복원이지 유출이 아니다.
-
-    화면에 원문 대신 [전화번호_1] 이 남는다. 잘못된 복원이 미복원보다
-    위험하다는 원칙과 같은 방향이다.
+    처음에는 오래된 것부터 버렸다. 그런데 버린 값은 다음 턴에 다시 가려지지 않아
+    그대로 유출됐다 — 대화 기록은 매 턴 다시 전송되므로 퇴출은 과거를 지우는 것이
+    아니라 보호를 푸는 것이었다. 메모리 상한과 유출 방지를 둘 다 지키려면 버리는
+    대신 거부해야 한다.
     """
     session = Session(capacity=2)
-    first = mask("연락처 010-1111-1111", session)
-
+    mask("연락처 010-1111-1111", session)
     mask("연락처 010-2222-2222", session)
-    mask("연락처 010-3333-3333", session)
 
-    assert restore(first, session) == first
-    assert "010-1111-1111" not in restore(first, session)
+    with pytest.raises(SessionFull):
+        mask("연락처 010-3333-3333", session)
+
+    assert len(session) == 2
 
 
-def test_다시_쓰인_값은_오래되었다고_버려지지_않는다():
-    """대화가 길어져도 계속 등장하는 값은 남아야 한다.
-
-    도구는 매 턴 대화 전체를 다시 보내므로, 앞부분의 개인정보도 매번 다시
-    가려진다. 등장 순서가 아니라 마지막으로 쓰인 시점을 기준으로 버린다.
-    """
+def test_상한에_닿아도_이미_아는_값은_계속_가린다():
+    """거부는 새 값에만 적용된다. 이미 가린 값은 끝까지 지켜야 한다."""
     session = Session(capacity=2)
-    first = mask("연락처 010-1111-1111", session)
-
+    가림 = mask("연락처 010-1111-1111", session)
     mask("연락처 010-2222-2222", session)
-    mask("연락처 010-1111-1111", session)   # 다시 등장
-    mask("연락처 010-3333-3333", session)   # 이때 밀려나는 것은 2222 여야 한다
 
-    assert restore(first, session) == "연락처 010-1111-1111"
-
-
-# ── 한 번 가린 값은 문맥이 바뀌어도 계속 가린다 ──────────────────────────
-# 마스킹은 문맥에 의존하지만(앵커) 복원은 문맥과 무관하다. 그래서 복원이 값을
-# 탐지기가 알아볼 수 없는 문맥으로 옮겨 놓는다. 실왕복에서 실제로 이름이
-# 업스트림에 두 번 나갔다. 세션은 자기가 가린 값을 알고 있으므로 그것으로 막는다.
+    assert restore(가림, session) == "연락처 010-1111-1111"
+    assert "010-1111-1111" not in mask("이전 번호 010-1111-1111 확인", session)
 
 
 def test_복원된_값이_앵커_없는_문맥으로_돌아와도_다시_가린다():
@@ -202,3 +180,38 @@ def test_세션이_모르는_값은_건드리지_않는다():
     session = Session()
 
     assert mask("내용이 `김수현` 처럼 보입니다", session) == "내용이 `김수현` 처럼 보입니다"
+
+
+def test_세션_값_재마스킹이_큰_세션에서도_실용적이다():
+    """세션이 커져도 요청 하나가 몇 밀리초 안에 끝나야 한다.
+
+    이미 가린 값을 거대한 정규식 대안으로 찾으면 파이썬 정규식 엔진이 매 위치마다
+    모든 대안을 시도해 본문 길이 × 값 개수로 비용이 커진다. 세션 상한이 10,000
+    이므로 긴 대화에서 프록시가 사실상 멈춘다. 실제로 값 2,000개에서 9KB 본문
+    마스킹이 2분을 넘겼다.
+    """
+    import time
+
+    session = Session()
+    for n in range(2000):
+        mask(f"연락처 010-{n // 10000:04d}-{n % 10000:04d}", session)
+
+    본문 = "일반 로그 줄입니다 " * 500  # 약 9KB
+    시작 = time.perf_counter()
+    mask(본문, session)
+    걸린시간 = time.perf_counter() -시작
+
+    assert 걸린시간 < 0.5, f"세션 {len(session)}건에서 9KB 마스킹에 {걸린시간:.1f}초"
+
+
+def test_한글이_바로_앞에_붙어도_숫자_값은_가린다():
+    """앞경계 규칙은 한글 낱말이 망가지는 것을 막으려는 것이다.
+
+    숫자 값에까지 적용하면 "잔액110-234-567890" 처럼 한글이 바로 붙은 자리에서
+    계좌번호가 가려지지 않는다. 경계 규칙이 유출 방향으로 작동한 셈이다.
+    값이 한글일 때만 앞경계를 본다.
+    """
+    session = Session()
+    mask("계좌: 110-234-567890", session)
+
+    assert "110-234-567890" not in mask("잔액110-234-567890 입니다", session)

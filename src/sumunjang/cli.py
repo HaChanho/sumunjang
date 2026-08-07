@@ -103,7 +103,9 @@ def _score_directory(directory: str) -> tuple[int, dict[str, dict]]:
     found: list[Span] = []
     for document in documents:
         truth.extend(document.spans)
-        found.extend(Span(f.category, f.start, f.end) for f in detect(document.text))
+        found.extend(
+            Span(f.category, f.start, f.end, document.doc_id) for f in detect(document.text)
+        )
 
     return len(documents), score(truth, found)
 

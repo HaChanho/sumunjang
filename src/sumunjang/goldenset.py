@@ -18,9 +18,18 @@ _MARKER = re.compile(r"\{\{([A-Z_]+):(.*?)\}\}", re.S)
 
 @dataclass(frozen=True)
 class Span:
+    """정답·탐지 한 건.
+
+    doc_id 가 키의 일부다. 이것이 없으면 서로 다른 문서의 같은 좌표가 한 건으로
+    합쳐진다. 실제로 goldenset-gaps 의 두 문서가 같은 좌표를 가져 정답 18건이
+    17건으로 줄고 공표한 재현율이 틀렸다. 더 나쁜 것은 가짜 적중이다 — 문서 B 의
+    순수 오탐이 문서 A 의 정답과 좌표가 같으면 맞힌 것으로 계산된다.
+    """
+
     category: str
     start: int
     end: int
+    doc_id: str = ""
 
 
 @dataclass
@@ -44,7 +53,9 @@ def parse_annotated(annotated: str, doc_id: str = "", domain: str = "") -> Docum
         length += len(plain)
 
         value = match.group(2)
-        spans.append(Span(category=match.group(1), start=length, end=length + len(value)))
+        spans.append(
+            Span(category=match.group(1), start=length, end=length + len(value), doc_id=doc_id)
+        )
         pieces.append(value)
         length += len(value)
         cursor = match.end()
@@ -83,15 +94,15 @@ def score(truth: list[Span], found: list[Span]) -> dict[str, dict]:
     스팬이 정확히 일치할 때만 맞은 것으로 센다. 부분 일치를 인정하면
     "절반만 가린" 결과가 성공으로 계산되어 지표가 실제보다 좋아 보인다.
     """
-    truth_set = {(s.category, s.start, s.end) for s in truth}
-    found_set = {(s.category, s.start, s.end) for s in found}
+    truth_set = {(s.doc_id, s.category, s.start, s.end) for s in truth}
+    found_set = {(s.doc_id, s.category, s.start, s.end) for s in found}
 
     categories = {s.category for s in truth} | {s.category for s in found}
     report: dict[str, dict] = {}
 
     for category in sorted(categories):
-        expected = {s for s in truth_set if s[0] == category}
-        actual = {s for s in found_set if s[0] == category}
+        expected = {s for s in truth_set if s[1] == category}
+        actual = {s for s in found_set if s[1] == category}
         hit = expected & actual
         missed = expected - actual
         false_positive = actual - expected

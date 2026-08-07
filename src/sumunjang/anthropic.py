@@ -10,37 +10,8 @@ import copy
 import json
 from typing import Any
 
-from .mask import Session, mask, restore
-
-
-def _mask_content(content: Any, session: Session) -> Any:
-    """content 필드는 문자열이거나 블록 배열이다. 둘 다 처리한다."""
-    if isinstance(content, str):
-        return mask(content, session)
-
-    if isinstance(content, list):
-        return [_mask_block(block, session) for block in content]
-
-    return content
-
-
-def _mask_block(block: Any, session: Session) -> Any:
-    if not isinstance(block, dict):
-        return block
-
-    kind = block.get("type")
-
-    if kind == "text" and isinstance(block.get("text"), str):
-        block["text"] = mask(block["text"], session)
-
-    elif kind == "tool_result":
-        # 파일·명령 실행 결과가 담기는 자리. 사용자가 붙여넣지 않아도 원문이 흐른다.
-        block["content"] = _mask_content(block.get("content"), session)
-
-    # tool_use.input 은 모델이 만든 값이다. 인바운드 텍스트가 모두 마스킹된 상태라면
-    # 모델은 원문을 본 적이 없으므로 여기에 원문 개인정보가 있을 수 없다.
-
-    return block
+from .body import mask_everything
+from .mask import Session, restore
 
 
 def count_masked(body: dict) -> list[str]:
@@ -54,19 +25,12 @@ def count_masked(body: dict) -> list[str]:
 
 
 def mask_request(body: dict, session: Session) -> dict:
-    """요청 본문의 마스킹 사본을 돌려준다. 원본은 그대로 둔다."""
-    masked = copy.deepcopy(body)
+    """요청 본문의 마스킹 사본을 돌려준다. 원본은 그대로 둔다.
 
-    if isinstance(masked.get("system"), str):
-        masked["system"] = mask(masked["system"], session)
-    elif isinstance(masked.get("system"), list):
-        masked["system"] = [_mask_block(block, session) for block in masked["system"]]
-
-    for message in masked.get("messages", []):
-        if isinstance(message, dict):
-            message["content"] = _mask_content(message.get("content"), session)
-
-    return masked
+    본문의 모든 문자열을 훑는다. 자리 목록을 두지 않는 이유는 body.py 에 적었다 —
+    아는 자리만 가린다는 것은 모르는 자리는 샌다는 뜻이기 때문이다.
+    """
+    return mask_everything(copy.deepcopy(body), session)
 
 
 def restore_response(body: dict, session: Session) -> dict:
