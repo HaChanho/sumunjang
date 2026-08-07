@@ -1,7 +1,7 @@
 """Anthropic Messages API 요청·응답 본문 변환 테스트."""
 
 from sumunjang.anthropic import mask_request, restore_response
-from sumunjang.mask import Session
+from sumunjang.mask import Session, mask
 
 
 def test_사용자_메시지의_문자열_본문을_마스킹한다():
@@ -78,3 +78,37 @@ def test_응답_본문의_placeholder를_복원한다():
     restored = restore_response(response, session)
 
     assert restored["content"][0]["text"] == "010-1234-5678 로 보냈습니다"
+
+
+def test_tool_use_의_가명_표시는_복원하지_않는다():
+    """의도된 동작이다. 지나가다 빠뜨린 것이 아니다.
+
+    tool_use.input 은 모델이 도구에게 건네는 인자다. 여기를 복원하면 모델이
+    부르는 **모든 도구**가 원문을 받는다. Write·Bash 는 사용자 기계에서 도니
+    괜찮지만, WebFetch 나 MCP 서버 호출은 다른 네트워크 출구다. 프록시는 도구
+    이름만 알 뿐 그것이 로컬인지 원격인지 알 방법이 없다.
+
+    모르면 복원하지 않는다 — 경계 게이트웨이의 기본값과 같은 방향이다.
+    대가로 에이전트가 파일을 쓸 때 가명 표시가 그대로 박힐 수 있다.
+    """
+    session = Session()
+    mask("담당자: 김수현", session)
+
+    body = {
+        "content": [
+            {"type": "text", "text": "[이름_1] 정보를 저장하겠습니다"},
+            {
+                "type": "tool_use",
+                "id": "toolu_1",
+                "name": "Write",
+                "input": {"file_path": "/tmp/out.md", "content": "담당자: [이름_1]"},
+            },
+        ]
+    }
+
+    restored = restore_response(body, session)
+
+    # 사람이 읽는 자리는 복원한다
+    assert restored["content"][0]["text"] == "김수현 정보를 저장하겠습니다"
+    # 도구에게 건네는 자리는 건드리지 않는다
+    assert restored["content"][1]["input"]["content"] == "담당자: [이름_1]"
