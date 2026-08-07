@@ -95,3 +95,49 @@ def test_모든_탐지_카테고리가_민감도_표에_들어_있다():
         f"서열에 없는 카테고리: {set(CATEGORIES) - set(SEVERITY)} / "
         f"탐지기에 없는 카테고리: {set(SEVERITY) - set(CATEGORIES)}"
     )
+
+
+def test_세션은_상한을_넘어서면_오래된_것부터_버린다():
+    """프록시는 세션 하나를 프로세스 수명 내내 들고 있다.
+
+    상한이 없으면 그날 오간 모든 개인정보가 원문 그대로 메모리에 쌓인다.
+    보안 도구가 스스로 개인정보 저장소가 되어서는 안 된다.
+    """
+    session = Session(capacity=3)
+
+    for n in range(5):
+        mask(f"연락처 010-0000-000{n}", session)
+
+    assert len(session) == 3
+
+
+def test_버려진_값은_복원되지_않을_뿐_유출되지_않는다():
+    """퇴출의 대가는 미복원이지 유출이 아니다.
+
+    화면에 원문 대신 [전화번호_1] 이 남는다. 잘못된 복원이 미복원보다
+    위험하다는 원칙과 같은 방향이다.
+    """
+    session = Session(capacity=2)
+    first = mask("연락처 010-1111-1111", session)
+
+    mask("연락처 010-2222-2222", session)
+    mask("연락처 010-3333-3333", session)
+
+    assert restore(first, session) == first
+    assert "010-1111-1111" not in restore(first, session)
+
+
+def test_다시_쓰인_값은_오래되었다고_버려지지_않는다():
+    """대화가 길어져도 계속 등장하는 값은 남아야 한다.
+
+    도구는 매 턴 대화 전체를 다시 보내므로, 앞부분의 개인정보도 매번 다시
+    가려진다. 등장 순서가 아니라 마지막으로 쓰인 시점을 기준으로 버린다.
+    """
+    session = Session(capacity=2)
+    first = mask("연락처 010-1111-1111", session)
+
+    mask("연락처 010-2222-2222", session)
+    mask("연락처 010-1111-1111", session)   # 다시 등장
+    mask("연락처 010-3333-3333", session)   # 이때 밀려나는 것은 2222 여야 한다
+
+    assert restore(first, session) == "연락처 010-1111-1111"

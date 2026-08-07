@@ -250,3 +250,110 @@ def test_스트리밍_요청은_복원된_내용을_SSE로_돌려준다():
     assert "event: content_block_delta" in sse_text
     assert "event: message_stop" in sse_text
     assert "900101-1234568" in sse_text
+
+
+# ── 경계 게이트웨이가 다뤄야 할 다른 경로들 ────────────────────────────────
+# Claude Code 는 /v1/messages 만 부르지 않는다. 토큰 계산과 모델 목록도 부른다.
+# 전부 404 로 막으면 안전하긴 하지만 도구가 제 기능을 못 한다.
+
+
+class PathRecorder:
+    """어떤 경로로 무엇이 왔는지 기록하는 업스트림."""
+
+    def __init__(self, payload: dict | None = None) -> None:
+        self.path: str | None = None
+        self.method: str | None = None
+        self.received: dict | None = None
+        self._payload = payload or {"input_tokens": 42}
+
+    async def __call__(self, scope, receive, send):
+        self.path, self.method = scope["path"], scope["method"]
+        chunks = []
+        while True:
+            message = await receive()
+            chunks.append(message.get("body", b""))
+            if not message.get("more_body"):
+                break
+        raw = b"".join(chunks)
+        self.received = json.loads(raw) if raw else None
+
+        body = json.dumps(self._payload).encode()
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [(b"content-type", b"application/json")],
+            }
+        )
+        await send({"type": "http.response.body", "body": body})
+
+
+async def _call(method: str, path: str, body: dict | None = None, payload: dict | None = None):
+    upstream = PathRecorder(payload)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=upstream), base_url="http://upstream"
+    ) as upstream_client:
+        app = create_app(upstream_base_url="http://upstream", client=upstream_client)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://proxy"
+        ) as proxy_client:
+            response = await proxy_client.request(method, path, json=body)
+    return upstream, response
+
+
+def test_토큰_계산_요청도_마스킹해서_넘긴다():
+    """본문 모양이 /v1/messages 와 같다. 막으면 도구가 문맥 길이를 못 재고,
+    그냥 통과시키면 원문이 그대로 나간다. 같은 변환을 적용한다."""
+    upstream, response = asyncio.run(
+        _call(
+            "POST",
+            "/v1/messages/count_tokens",
+            {"model": "claude-opus-4", "messages": [{"role": "user", "content": "고객 900101-1234568"}]},
+        )
+    )
+
+    assert response.status_code == 200
+    assert upstream.path == "/v1/messages/count_tokens"
+    wire = json.dumps(upstream.received, ensure_ascii=False)
+    assert "900101-1234568" not in wire
+    assert "주민등록번호_1" in wire
+
+
+def test_모델_목록은_그대로_통과시킨다():
+    """개인정보가 실릴 수 없는 읽기 전용 경로다. 막을 이유가 없다."""
+    upstream, response = asyncio.run(_call("GET", "/v1/models", payload={"data": []}))
+
+    assert response.status_code == 200
+    assert upstream.path == "/v1/models"
+    assert upstream.method == "GET"
+
+
+def test_허용_목록에_없는_경로는_업스트림에_닿지_않는다():
+    """모르는 경로를 그냥 흘려보내면 마스킹을 거치지 않은 본문이 나간다.
+    경계 게이트웨이의 기본값은 통과가 아니라 차단이어야 한다."""
+    upstream, response = asyncio.run(
+        _call("POST", "/v1/some_new_endpoint", {"secret": "고객 900101-1234568"})
+    )
+
+    assert response.status_code == 404
+    assert upstream.path is None, "업스트림에 요청이 닿았다"
+
+
+def test_마스킹이_깨지면_업스트림에_아무것도_보내지_않는다(monkeypatch):
+    """탐지·마스킹에서 예외가 나면 조용히 원문을 흘려보내는 대신 요청을 버린다.
+
+    보안 도구의 실패 모드는 통과가 아니라 차단이어야 한다.
+    """
+    import sumunjang.proxy as proxy_module
+
+    def 폭발(*args, **kwargs):
+        raise RuntimeError("탐지 중 예외")
+
+    monkeypatch.setattr(proxy_module, "mask_request", 폭발)
+
+    upstream, response = asyncio.run(
+        _call("POST", "/v1/messages", {"messages": [{"role": "user", "content": "고객 900101-1234568"}]})
+    )
+
+    assert response.status_code == 500
+    assert upstream.path is None, "마스킹이 깨졌는데 업스트림에 요청이 갔다"

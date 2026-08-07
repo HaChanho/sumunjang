@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import re
+from collections import OrderedDict
 
 from .detect import Finding, detect
 
@@ -28,27 +29,54 @@ _LABELS = {
 _PLACEHOLDER_PATTERN = re.compile(r"\[(?:" + "|".join(_LABELS.values()) + r")_\d+\]")
 
 
+# 세션이 들고 있을 매핑의 상한. 프록시는 세션 하나를 프로세스 수명 내내 들고
+# 있으므로, 상한이 없으면 그날 오간 모든 개인정보가 원문 그대로 메모리에 쌓인다.
+# 보안 도구가 스스로 개인정보 저장소가 되어서는 안 된다.
+#
+# 하루치 대화에서 서로 다른 개인정보가 만 건을 넘는 일은 드물고, 넘더라도 대가는
+# 미복원이지 유출이 아니다.
+_DEFAULT_CAPACITY = 10_000
+
+
 class Session:
     """한 대화에서 쓰는 마스킹 매핑.
 
-    원문 개인정보를 그대로 담고 있으므로 기본은 메모리에만 둔다.
+    원문 개인정보를 그대로 담고 있으므로 기본은 메모리에만 두고, 담는 양에
+    상한을 둔다. 상한을 넘으면 가장 오래 쓰이지 않은 것부터 버린다.
+
+    버려진 값은 복원되지 않을 뿐 유출되지 않는다 — 화면에 원문 대신 가명 표시가
+    남는다. 잘못된 복원이 미복원보다 위험하다는 원칙과 같은 방향이다.
     """
 
-    def __init__(self) -> None:
-        self._placeholder_by_value: dict[tuple[str, str], str] = {}
+    def __init__(self, capacity: int = _DEFAULT_CAPACITY) -> None:
+        self._capacity = capacity
+        self._placeholder_by_value: OrderedDict[tuple[str, str], str] = OrderedDict()
         self._value_by_placeholder: dict[str, str] = {}
         self._counts: dict[str, int] = {}
 
     def placeholder_for(self, category: str, value: str) -> str:
         """같은 값에는 언제나 같은 이름을 준다 — 모델이 문맥을 잃지 않도록."""
         key = (category, value)
-        if key not in self._placeholder_by_value:
-            self._counts[category] = self._counts.get(category, 0) + 1
-            label = _LABELS.get(category, category)
-            placeholder = f"[{label}_{self._counts[category]}]"
-            self._placeholder_by_value[key] = placeholder
-            self._value_by_placeholder[placeholder] = value
-        return self._placeholder_by_value[key]
+        if key in self._placeholder_by_value:
+            # 다시 쓰였으므로 뒤로 보낸다. 도구는 매 턴 대화 전체를 다시 보내므로
+            # 앞부분의 개인정보도 매번 다시 가려진다. 등장 순서가 아니라 마지막으로
+            # 쓰인 시점을 기준으로 버려야 긴 대화에서 앞부분이 먼저 사라지지 않는다.
+            self._placeholder_by_value.move_to_end(key)
+            return self._placeholder_by_value[key]
+
+        self._counts[category] = self._counts.get(category, 0) + 1
+        label = _LABELS.get(category, category)
+        placeholder = f"[{label}_{self._counts[category]}]"
+        self._placeholder_by_value[key] = placeholder
+        self._value_by_placeholder[placeholder] = value
+        self._evict_overflow()
+        return placeholder
+
+    def _evict_overflow(self) -> None:
+        while len(self._placeholder_by_value) > self._capacity:
+            _, evicted = self._placeholder_by_value.popitem(last=False)
+            # 두 사전을 함께 비운다. 한쪽만 지우면 원문이 계속 메모리에 남는다.
+            self._value_by_placeholder.pop(evicted, None)
 
     def original_for(self, placeholder: str) -> str | None:
         return self._value_by_placeholder.get(placeholder)

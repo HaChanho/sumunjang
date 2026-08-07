@@ -20,6 +20,18 @@ ANTHROPIC_API = "https://api.anthropic.com"
 # 업스트림으로 넘기지 않는 헤더. 홉 단위 정보와 길이는 새로 계산된다.
 _SKIP_HEADERS = {b"host", b"content-length", b"connection", b"accept-encoding"}
 
+# 경로마다 다르게 다룬다. 기본값은 통과가 아니라 차단이다 — 경계 게이트웨이가
+# 모르는 경로를 흘려보내면 마스킹을 거치지 않은 본문이 그대로 나간다.
+#
+# 마스킹해서 넘기는 경로. 두 엔드포인트는 본문 모양이 같아 같은 변환을 쓴다.
+# count_tokens 를 막아 두면 도구가 문맥 길이를 재지 못하고, 그냥 통과시키면
+# 원문이 그대로 나간다. 마스킹한 본문의 토큰 수가 실제로 나가는 본문의 토큰
+# 수이므로 오히려 정확하다.
+_MASKED_PATHS = ("/v1/messages", "/v1/messages/count_tokens")
+
+# 개인정보가 실릴 수 없는 읽기 전용 경로. 본문이 없고 경로에 식별자만 온다.
+_PASSTHROUGH_PREFIX = "/v1/models"
+
 
 async def _read_body(receive) -> bytes:
     chunks = []
@@ -142,6 +154,36 @@ async def _send_json(send, status: int, payload: Any) -> None:
     await send({"type": "http.response.body", "body": body})
 
 
+async def _passthrough(send, client, owns_client, upstream_base_url, path, headers) -> None:
+    """마스킹 없이 그대로 넘긴다. 본문이 없는 읽기 전용 경로에만 쓴다.
+
+    개인정보가 실릴 수 없는 경로여야 한다. 판단이 서지 않는 경로는 여기가 아니라
+    404 로 보낸다 — 게이트웨이의 기본값은 통과가 아니라 차단이다.
+    """
+    http = client or httpx.AsyncClient(timeout=600.0)
+    try:
+        upstream = await http.get(f"{upstream_base_url}{path}", headers=headers)
+    except httpx.HTTPError as exc:
+        await _send_json(
+            send,
+            502,
+            {"type": "error", "error": {"type": "upstream_error", "message": f"업스트림 연결 실패: {exc}"}},
+        )
+        return
+    finally:
+        if owns_client:
+            await http.aclose()
+
+    await send(
+        {
+            "type": "http.response.start",
+            "status": upstream.status_code,
+            "headers": [(b"content-type", upstream.headers.get("content-type", "application/json").encode())],
+        }
+    )
+    await send({"type": "http.response.body", "body": upstream.content})
+
+
 def create_app(
     upstream_base_url: str = ANTHROPIC_API,
     client: httpx.AsyncClient | None = None,
@@ -159,7 +201,18 @@ def create_app(
         if scope["type"] != "http":
             return
 
-        if scope["path"] != "/v1/messages" or scope["method"] != "POST":
+        path, method = scope["path"], scope["method"]
+        headers = {
+            key.decode(): value.decode()
+            for key, value in scope.get("headers", [])
+            if key.lower() not in _SKIP_HEADERS
+        }
+
+        if path.startswith(_PASSTHROUGH_PREFIX) and method == "GET":
+            await _passthrough(send, client, owns_client, upstream_base_url, path, headers)
+            return
+
+        if path not in _MASKED_PATHS or method != "POST":
             await _send_json(
                 send,
                 404,
@@ -180,7 +233,24 @@ def create_app(
 
         wants_stream = bool(body.get("stream"))
         before = len(session)
-        masked = mask_request(body, session)
+
+        try:
+            masked = mask_request(body, session)
+        except Exception as exc:  # noqa: BLE001 — 무엇이 터지든 나가면 안 된다
+            # 보안 도구의 실패 모드는 통과가 아니라 차단이다. 마스킹이 깨졌는데
+            # 요청을 그대로 흘려보내면 도구가 있는 편이 없는 편보다 위험해진다.
+            # 원문이 담길 수 있으므로 예외 메시지는 응답에 싣지 않는다.
+            print(f"[수문장] 마스킹 실패로 요청을 버렸습니다: {type(exc).__name__}", flush=True)
+            await _send_json(
+                send,
+                500,
+                {
+                    "type": "error",
+                    "error": {"type": "masking_failed", "message": "마스킹에 실패해 요청을 보내지 않았습니다"},
+                },
+            )
+            return
+
         # 업스트림에는 통짜로 요청한다. 복원을 끝낸 뒤 클라이언트에게만 스트리밍으로 보인다.
         masked.pop("stream", None)
 
@@ -198,16 +268,10 @@ def create_app(
                 }
             )
 
-        headers = {
-            key.decode(): value.decode()
-            for key, value in scope.get("headers", [])
-            if key.lower() not in _SKIP_HEADERS
-        }
-
         http = client or httpx.AsyncClient(timeout=600.0)
         try:
             upstream = await http.post(
-                f"{upstream_base_url}/v1/messages", json=masked, headers=headers
+                f"{upstream_base_url}{path}", json=masked, headers=headers
             )
         except httpx.HTTPError as exc:
             # 게이트웨이 자체 오류임을 헤더로 구분해 알린다.
