@@ -14,6 +14,15 @@ from .detect import detect
 from .mask import Session, mask, restore
 
 
+# 채점 대상 골든셋. 셋을 나눠 두는 이유는 점수의 의미가 서로 다르기 때문이다.
+#   goldenset       회귀 기준선. 여기가 깨지면 이미 되던 것이 망가진 것이다.
+#   goldenset-hard  표기 변형·오탐 함정. 새로 만든 규칙을 시험한다.
+#   goldenset-gaps  못 잡는다고 선언한 것들. 0점으로 나오는 것이 정상이다.
+# 한 표에 합치면 "쉬운 것만 골랐다" 는 반문에도, "왜 점수가 낮냐" 는 반문에도
+# 답할 수 없다. 나눠서 각각의 의미를 붙인다.
+DEFAULT_GOLDENSETS = ("goldenset", "goldenset-hard", "goldenset-gaps")
+
+
 def _read_input(source: str, stdin: IO[str]) -> str:
     if source == "-":
         return stdin.read()
@@ -35,7 +44,12 @@ def _build_parser() -> argparse.ArgumentParser:
     mask_cmd.add_argument("source", help="파일 경로 또는 - (표준 입력)")
 
     report = sub.add_parser("report", help="골든셋으로 탐지 성능을 채점한다")
-    report.add_argument("directory", nargs="?", default="goldenset", help="골든셋 디렉토리")
+    report.add_argument(
+        "directories",
+        nargs="*",
+        default=list(DEFAULT_GOLDENSETS),
+        help=f"골든셋 디렉토리 (기본: {' '.join(DEFAULT_GOLDENSETS)})",
+    )
     report.add_argument("--json", action="store_true", help="JSON으로 출력")
 
     proxy = sub.add_parser("proxy", help="AI API 경계 게이트웨이를 띄운다")
@@ -53,6 +67,118 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     return parser
+
+
+def _score_directory(directory: str) -> tuple[int, dict[str, dict]]:
+    """디렉토리 하나를 채점해 (문서 수, 카테고리별 지표) 를 돌려준다."""
+    from .goldenset import Span, load_directory, score
+
+    documents = load_directory(directory)
+    truth: list[Span] = []
+    found: list[Span] = []
+    for document in documents:
+        truth.extend(document.spans)
+        found.extend(Span(f.category, f.start, f.end) for f in detect(document.text))
+
+    return len(documents), score(truth, found)
+
+
+def _totals(result: dict[str, dict]) -> tuple[int, int, int]:
+    return (
+        sum(m["expected"] for m in result.values()),
+        sum(m["detected"] for m in result.values()),
+        sum(m["hit"] for m in result.values()),
+    )
+
+
+def _print_table(directory: str, count: int, result: dict[str, dict], stdout: IO[str]) -> None:
+    from pathlib import Path
+
+    expected, detected, hit = _totals(result)
+    print(f"\n## {Path(directory).name}\n", file=stdout)
+    print(f"- 문서 {count}건, 정답 {expected}건", file=stdout)
+    print(f"- 재현 방법: `sumunjang report {directory}`\n", file=stdout)
+    print("| 카테고리 | 정답 | 탐지 | 적중 | 오탐 | 재현율 | 정밀도 |", file=stdout)
+    print("|---|---:|---:|---:|---:|---:|---:|", file=stdout)
+    for category, metric in result.items():
+        print(
+            f"| {category} | {metric['expected']} | {metric['detected']} | {metric['hit']} | "
+            f"{metric['false_positive']} | {metric['recall']:.3f} | {metric['precision']:.3f} |",
+            file=stdout,
+        )
+    if expected:
+        # 정밀도의 분모는 탐지 건수다. 한 건도 탐지하지 않았다면 정밀도는 정의되지
+        # 않으므로 1.000 이 아니라 0.000 으로 적는다 — 아무것도 안 한 것을 만점으로
+        # 읽게 두면 안 된다.
+        print(
+            f"| **전체** | {expected} | {detected} | {hit} | {detected - hit} | "
+            f"{hit / expected:.3f} | {hit / detected if detected else 0.0:.3f} |",
+            file=stdout,
+        )
+
+
+_LIMITS = """
+## 이 수치의 한계
+
+- 골든셋은 개발자가 자체 제작한 합성 문서다. 도구를 만든 사람이 정답도 만들었으므로
+  이 점수는 독립적인 성능 증명이 아니라 회귀를 감시하는 기준선이다.
+- 셋마다 의미가 다르다. `goldenset` 은 회귀 기준선이고, `goldenset-hard` 는 표기
+  변형과 오탐 함정을 시험하며, `goldenset-gaps` 는 **못 잡는다고 선언한 것들**이라
+  점수가 낮은 것이 정상이다. 만점 셋만 내놓으면 "쉬운 것만 골랐다" 는 반문에
+  답할 수 없으므로 0점 셋을 나란히 공개한다.
+- 스팬이 정확히 일치할 때만 적중으로 센다. 부분 일치를 인정하면 "절반만 가린"
+  결과가 성공으로 계산된다. 다만 남은 절반이 실제로 새어나갔는지는 이 표가 아니라
+  누출 속성 테스트(`tests/test_leak.py`)가 검사한다.
+"""
+
+
+def _report(args, stdout: IO[str], stderr: IO[str]) -> int:
+    import json as json_module
+    from pathlib import Path
+
+    explicit = args.directories != list(DEFAULT_GOLDENSETS)
+    targets = [d for d in args.directories if explicit or Path(d).is_dir()]
+    if not targets:
+        print(f"골든셋 디렉토리가 없습니다: {' '.join(args.directories)}", file=stderr)
+        return 3
+
+    scored = []
+    for directory in targets:
+        try:
+            count, result = _score_directory(directory)
+        except OSError as exc:
+            print(f"골든셋을 읽지 못했습니다: {exc}", file=stderr)
+            return 3
+        if not count:
+            print(f"골든셋 문서가 없습니다: {directory}", file=stderr)
+            return 3
+        scored.append((directory, count, result))
+
+    if args.json:
+        print(
+            json_module.dumps(
+                {
+                    Path(directory).name: {
+                        "documents": count,
+                        "categories": result,
+                        "total": dict(
+                            zip(("expected", "detected", "hit"), _totals(result))
+                        ),
+                    }
+                    for directory, count, result in scored
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            file=stdout,
+        )
+        return 0
+
+    print("# 수문장 탐지 성능 자체 평가", file=stdout)
+    for directory, count, result in scored:
+        _print_table(directory, count, result, stdout)
+    print(_LIMITS, file=stdout)
+    return 0
 
 
 def run(
@@ -101,75 +227,7 @@ def run(
         return 0
 
     if args.command == "report":
-        import json as json_module
-
-        from .goldenset import Span, load_directory, score
-
-        try:
-            documents = load_directory(args.directory)
-        except OSError as exc:
-            print(f"골든셋을 읽지 못했습니다: {exc}", file=stderr)
-            return 3
-
-        if not documents:
-            print(f"골든셋 문서가 없습니다: {args.directory}", file=stderr)
-            return 3
-
-        truth: list[Span] = []
-        found: list[Span] = []
-        for document in documents:
-            truth.extend(document.spans)
-            found.extend(
-                Span(f.category, f.start, f.end) for f in detect(document.text)
-            )
-
-        result = score(truth, found)
-        expected = sum(m["expected"] for m in result.values())
-        detected = sum(m["detected"] for m in result.values())
-        hit = sum(m["hit"] for m in result.values())
-
-        if args.json:
-            print(
-                json_module.dumps(
-                    {
-                        "documents": len(documents),
-                        "categories": result,
-                        "total": {"expected": expected, "detected": detected, "hit": hit},
-                    },
-                    ensure_ascii=False,
-                    indent=2,
-                ),
-                file=stdout,
-            )
-            return 0
-
-        print(f"# 수문장 탐지 성능 자체 평가\n", file=stdout)
-        print(f"- 문서 {len(documents)}건, 정답 {expected}건", file=stdout)
-        print(f"- 재현 방법: `sumunjang report {args.directory}`\n", file=stdout)
-        print("| 카테고리 | 정답 | 탐지 | 적중 | 재현율 | 정밀도 |", file=stdout)
-        print("|---|---:|---:|---:|---:|---:|", file=stdout)
-        for category, metric in result.items():
-            print(
-                f"| {category} | {metric['expected']} | {metric['detected']} | "
-                f"{metric['hit']} | {metric['recall']:.3f} | {metric['precision']:.3f} |",
-                file=stdout,
-            )
-        if expected and detected:
-            print(
-                f"| **전체** | {expected} | {detected} | {hit} | "
-                f"{hit / expected:.3f} | {hit / detected:.3f} |",
-                file=stdout,
-            )
-
-        print(
-            "\n## 이 수치의 한계\n"
-            "- 골든셋은 개발자가 자체 제작한 합성 문서다. 도구를 만든 사람이 정답도 만들었으므로\n"
-            "  이 점수는 독립적인 성능 증명이 아니라 회귀를 감시하는 기준선이다.\n"
-            "- 규칙에 없는 표기·문맥 의존 개인정보(이름, 자유서술 주소)는 정답에 포함되지 않았다.\n"
-            "  현재 탐지 범위 자체의 한계이며 점수에 반영되지 않는다.",
-            file=stdout,
-        )
-        return 0
+        return _report(args, stdout, stderr)
 
     if args.command == "proxy":
         import json
