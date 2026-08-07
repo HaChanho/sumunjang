@@ -43,8 +43,28 @@ from typing import Any
 from .detect import detect
 from .mask import Session, mask
 
-# 글자로 읽을 수 없는 첨부의 미디어 타입. 여기에 해당해야만 알맹이를 건너뛴다.
-_BINARY_MEDIA = ("image/", "audio/", "video/", "application/pdf")
+# 미디어 타입마다 파일이 실제로 시작하는 바이트(매직 넘버). 선언과 알맹이가
+# 맞아야만 건너뛴다.
+#
+# 근거를 "탐지 규칙에 안 걸리는가" 로 두었다가 뚫렸다. 유효한 주민등록번호를
+# 이어 붙이면 경계 조건(?<!\d) 때문에 탐지가 0건이 되고 그대로 통과했다.
+# 탐지기의 오탐 방지 장치를 역이용한 것이다. 근거를 탐지 결과에 두면
+# **탐지기의 한계가 그대로 예외의 한계**가 된다.
+#
+# 매직 넘버는 요청자가 흉내낼 수 있지만, 흉내내려면 진짜 파일 헤더를 붙여야
+# 한다. 그러면 그것은 진짜 첨부 안에 개인정보를 숨긴 것이고, 이미 선언한
+# 한계(첨부 파일 안은 보지 않는다)와 같은 자리다.
+_MAGIC = {
+    "image/png": (b"\x89PNG\r\n\x1a\n",),
+    "image/jpeg": (b"\xff\xd8\xff",),
+    "image/gif": (b"GIF87a", b"GIF89a"),
+    "image/webp": (b"RIFF",),
+    "image/bmp": (b"BM",),
+    "application/pdf": (b"%PDF-",),
+    "audio/mpeg": (b"ID3", b"\xff\xfb"),
+    "audio/wav": (b"RIFF",),
+    "video/mp4": (b"\x00\x00\x00",),
+}
 
 # 짧은 값은 우연히 base64 로 읽힐 수 있다. 짧으면 가려도 손해가 없으므로 하한을 둔다.
 _MIN_ATTACHMENT_BYTES = 32
@@ -69,7 +89,8 @@ def _opaque_base64(value: str, media_type: str) -> bool:
     첨부(text/*, application/json …)는 건너뛰지 않고 그대로 검사한다.
     건너뛰는 것은 그림·소리·PDF 처럼 글자로 읽을 수 없는 것뿐이다.
     """
-    if not media_type.startswith(_BINARY_MEDIA):
+    시작바이트 = _MAGIC.get(media_type)
+    if 시작바이트 is None:
         return False
     try:
         풀린것 = base64.b64decode(value, validate=True)
@@ -78,17 +99,9 @@ def _opaque_base64(value: str, media_type: str) -> bool:
     if len(풀린것) < _MIN_ATTACHMENT_BYTES:
         return False
 
-    # 마지막이자 가장 중요한 관문 — **이 값에서 개인정보가 보이면 알맹이가 아니다.**
-    #
-    # 디코드되는지만 물었다가 뚫렸다. base64 알파벳은 숫자와 영문자를 전부
-    # 포함하므로, 구분자 없이 적은 한국 식별자와 API 키는 **인코딩 없이도**
-    # 조건을 만족한다. `AKIAIOSFODNN7EXAMPLE…` 은 그 자체가 유효한 base64 다.
-    # "제대로 인코딩해 그림이라고 주장해야 한다" 던 전제가 성립하지 않았다.
-    #
-    # 탐지되는지는 요청자가 흉내낼 수 없다. 개인정보처럼 보이면 그 순간 예외가
-    # 아니다. 진짜 그림의 base64 가 탐지 규칙에 걸릴 확률은 낮고, 걸린다면
-    # 가려서 첨부가 깨지는 쪽이 안전한 실패다.
-    return not detect(value)
+    # 선언한 미디어 타입의 실제 시작 바이트가 있어야 한다. 여기에 더해 알맹이에서
+    # 개인정보가 보이면 알맹이가 아니다 — 두 관문을 함께 통과해야 건너뛴다.
+    return 풀린것.startswith(시작바이트) and not detect(value)
 
 
 def _is_opaque(key: str, value: str, parent: dict, session: Session) -> bool:

@@ -508,3 +508,77 @@ def test_OpenAI_스트리밍이_거절과_사용량을_잃지_않는다():
     assert "그 요청은 도와드릴 수 없습니다" in 본문
     assert "total_tokens" in 본문
     assert 본문.rstrip().endswith("data: [DONE]")
+
+
+def test_헤더에_개인정보가_있으면_요청을_보내지_않는다():
+    """본문만 전수 검사하고 헤더를 흘려보내고 있었다.
+
+    가려서 보내지 않고 거부하는 이유는 가명 표시가 한글이라 HTTP 헤더로
+    인코딩되지 않기 때문이다. 경로·쿼리와 같은 판단이다 — 보낼 수 없으면
+    보내지 않는다.
+    """
+    upstream, response = asyncio.run(
+        _call(
+            "POST",
+            "/v1/messages",
+            {"messages": [{"role": "user", "content": "안녕"}]},
+        )
+    )
+    assert response.status_code == 200  # 정상 요청은 통과한다
+
+    받은것 = {}
+
+    async def 시나리오():
+        recorder = PathRecorder({"content": []})
+
+        async def 기록(scope, receive, send):
+            받은것.update({k.decode(): v.decode() for k, v in scope["headers"]})
+            await recorder(scope, receive, send)
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=기록), base_url="http://upstream"
+        ) as up:
+            app = create_app(upstream_base_url="http://upstream", client=up)
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://proxy"
+            ) as proxy_client:
+                return await proxy_client.post(
+                    "/v1/messages",
+                    json={"messages": [{"role": "user", "content": "안녕"}]},
+                    headers={"x-api-key": "sk-ant-key", "x-customer-email": "hong@example.com"},
+                )
+
+    거부됨 = asyncio.run(시나리오())
+
+    assert 거부됨.status_code == 400
+    assert not 받은것, "헤더에 개인정보가 있는데 업스트림에 요청이 갔다"
+
+
+def test_자격증명과_협상_헤더는_그대로_넘긴다():
+    """훼손하면 요청 자체가 성립하지 않는 자리다."""
+    받은것 = {}
+
+    async def 시나리오():
+        recorder = PathRecorder({"content": []})
+
+        async def 기록(scope, receive, send):
+            받은것.update({k.decode(): v.decode() for k, v in scope["headers"]})
+            await recorder(scope, receive, send)
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=기록), base_url="http://upstream"
+        ) as up:
+            app = create_app(upstream_base_url="http://upstream", client=up)
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://proxy"
+            ) as proxy_client:
+                await proxy_client.post(
+                    "/v1/messages",
+                    json={"messages": [{"role": "user", "content": "안녕"}]},
+                    headers={"x-api-key": "sk-ant-real-key", "anthropic-version": "2023-06-01"},
+                )
+
+    asyncio.run(시나리오())
+
+    assert 받은것["x-api-key"] == "sk-ant-real-key"
+    assert 받은것["anthropic-version"] == "2023-06-01"

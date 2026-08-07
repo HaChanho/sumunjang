@@ -28,6 +28,18 @@ ANTHROPIC_API = "https://api.anthropic.com"
 # 업스트림으로 넘기지 않는 헤더. 홉 단위 정보와 길이는 새로 계산된다.
 _SKIP_HEADERS = {b"host", b"content-length", b"connection", b"accept-encoding"}
 
+# 마스킹하지 않고 그대로 넘기는 요청 헤더. 자격증명과 프로토콜 협상 값이라
+# 훼손하면 요청 자체가 성립하지 않는다.
+#
+# 나머지 헤더는 가린다. 본문만 전수 검사하고 헤더를 통째로 흘려보내고 있었는데,
+# `x-customer-email: hong@example.com` 같은 사용자 지정 헤더가 그대로 나갔다.
+# 경계 게이트웨이가 요청의 일부만 지키면 그것은 경계가 아니다.
+_VERBATIM_HEADERS = frozenset({
+    "authorization", "x-api-key", "anthropic-version", "anthropic-beta",
+    "openai-organization", "openai-project", "openai-beta",
+    "content-type", "accept", "user-agent", "x-stainless-lang",
+})
+
 # 업스트림 응답에서 클라이언트에게 그대로 넘겨야 하는 헤더.
 # 전부 버렸더니 429 의 retry-after 까지 사라져 SDK 의 백오프가 근거 없는
 # 지수 백오프로 떨어지고, request-id 가 없어 장애 신고 추적이 끊겼다.
@@ -55,6 +67,25 @@ _MAX_BODY_BYTES = 32 * 1024 * 1024
 
 _PASSTHROUGH_EXACT = "/v1/models"
 _PASSTHROUGH_PREFIX = "/v1/models/"
+
+
+def _pii_in_headers(headers: dict, session) -> str:
+    """개인정보가 든 헤더 이름을 돌려준다. 없으면 빈 문자열.
+
+    본문만 전수 검사하고 헤더를 통째로 흘려보내고 있었다.
+    `x-customer-email: hong@example.com` 같은 사용자 지정 헤더가 그대로
+    나갔다 — 경계 게이트웨이가 요청의 일부만 지키면 그것은 경계가 아니다.
+
+    가려서 보내지 않고 거부하는 이유는 가명 표시가 한글이라 HTTP 헤더로
+    인코딩되지 않기 때문이다. 영문 표시로 바꾸면 본문과 이름이 갈린다.
+    경로·쿼리와 같은 판단이다 — 보낼 수 없으면 보내지 않는다.
+    """
+    문제 = [
+        name
+        for name, value in headers.items()
+        if name.lower() not in _VERBATIM_HEADERS and mask(value, session) != value
+    ]
+    return ", ".join(문제)
 
 
 async def _read_body(receive) -> bytes:
@@ -338,7 +369,7 @@ def create_app(
             return
 
         path, method = scope["path"], scope["method"]
-        headers = {
+        raw_headers = {
             key.decode(): value.decode()
             for key, value in scope.get("headers", [])
             if key.lower() not in _SKIP_HEADERS
@@ -351,10 +382,10 @@ def create_app(
         if method == "GET" and (
             normalized == _PASSTHROUGH_EXACT or normalized.startswith(_PASSTHROUGH_PREFIX)
         ):
-            # 본문이 없다는 것이 경로·쿼리에 개인정보가 없다는 뜻은 아니다.
+            # 본문이 없다는 것이 경로·쿼리·헤더에 개인정보가 없다는 뜻은 아니다.
             # /v1/models/900101-1234568?email=... 은 그대로 나갈 수 있다.
             try:
-                passthrough_session = session_for(headers)
+                passthrough_session = session_for(raw_headers)
             except SessionFull as exc:
                 # POST 는 429 를 내는데 GET 만 예외가 앱 밖으로 터지면 안 된다.
                 await _send_json(
@@ -370,6 +401,20 @@ def create_app(
             # 실릴 이유가 없다.
             raw_query = scope.get("query_string", b"").decode()
             풀린것 = unquote(unquote(normalized + "?" + raw_query))
+            헤더_문제 = _pii_in_headers(raw_headers, passthrough_session)
+            if 헤더_문제:
+                await _send_json(
+                    send,
+                    400,
+                    {
+                        "type": "error",
+                        "error": {
+                            "type": "pii_in_headers",
+                            "message": f"헤더에 개인정보가 있어 요청을 보내지 않았습니다: {헤더_문제}",
+                        },
+                    },
+                )
+                return
             if mask(풀린것, passthrough_session) != 풀린것:
                 await _send_json(
                     send,
@@ -390,7 +435,7 @@ def create_app(
                 owns_client,
                 upstream_base_url,
                 normalized,
-                headers,
+                raw_headers,
                 query,
             )
             return
@@ -427,8 +472,9 @@ def create_app(
             # dict 가 아닌 본문(배열·문자열·null)도 여기서 걸린다. 밖에 두면
             # AttributeError 가 ASGI 핸들러 밖으로 터져 설계한 응답 대신
             # 서버의 맨 500 이 나간다.
-            session = session_for(headers)
+            session = session_for(raw_headers)
             before = len(session)
+            헤더에_개인정보 = _pii_in_headers(raw_headers, session)
             wants_stream = bool(body["stream"]) if "stream" in body else False
             masked = protocol.mask(body, session)
             # 업스트림에는 통짜로 요청한다. 복원을 끝낸 뒤 클라이언트에게만
@@ -466,6 +512,25 @@ def create_app(
                 },
             )
             return
+
+        if 헤더에_개인정보:
+            # 헤더는 가려서 보낼 수 없다. 가명 표시가 한글이라 HTTP 헤더로
+            # 인코딩되지 않고, 영문 표시로 바꾸면 본문과 이름이 갈린다.
+            # 경로·쿼리와 같은 판단을 한다 — 보낼 수 없으면 보내지 않는다.
+            await _send_json(
+                send,
+                400,
+                {
+                    "type": "error",
+                    "error": {
+                        "type": "pii_in_headers",
+                        "message": f"헤더에 개인정보가 있어 요청을 보내지 않았습니다: {헤더에_개인정보}",
+                    },
+                },
+            )
+            return
+
+        headers = raw_headers
 
 
         if on_request is not None:

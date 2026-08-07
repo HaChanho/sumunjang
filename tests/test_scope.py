@@ -277,3 +277,26 @@ def test_base64_알파벳을_흉내낸_개인정보는_건너뛰지_않는다():
     나간것 = anthropic_mask(그림, Session())
     assert 나간것["messages"][0]["content"][0]["source"]["data"] == 진짜
 
+
+
+def test_선언한_미디어_타입의_실제_시작_바이트가_있어야_건너뛴다():
+    """예외 근거를 "탐지 규칙에 안 걸리는가" 로 두면 탐지기의 한계가 그대로
+    예외의 한계가 된다. 매직 넘버는 그 고리를 끊는다."""
+    import base64
+
+    진짜 = base64.b64encode(b"\x89PNG\r\n\x1a\n" + bytes(range(60))).decode()
+    가짜 = base64.b64encode(b"NOTPNG!!" + bytes(range(60))).decode()
+
+    def 첨부(알맹이):
+        return {"messages": [{"role": "user", "content": [
+            {"type": "image", "source": {
+                "type": "base64", "media_type": "image/png", "data": 알맹이}}]}]}
+
+    보존 = anthropic_mask(첨부(진짜), Session())
+    assert 보존["messages"][0]["content"][0]["source"]["data"] == 진짜
+
+    # PNG 라 주장하지만 PNG 가 아닌 것은 예외가 아니다 — 알맹이로 취급하지 않는다.
+    from sumunjang.body import _opaque_base64
+
+    assert not _opaque_base64(가짜, "image/png")
+    assert _opaque_base64(진짜, "image/png")

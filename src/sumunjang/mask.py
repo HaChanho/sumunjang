@@ -42,6 +42,10 @@ _DEFAULT_CAPACITY = 10_000
 # 있다. 이 길이를 넘는 개인정보는 현실에 없다.
 _MAX_VALUE_LENGTH = 4_096
 
+# 기억해 둘 추론 블록 수. 넘으면 통째로 비운다 — 잊으면 다음 턴에 그 블록이
+# 마스킹 대상이 될 뿐이라 유출로는 이어지지 않는다.
+_MAX_EMITTED = 512
+
 
 class SessionFull(Exception):
     """세션 상한에 닿았다. 요청을 거부해야 한다.
@@ -125,8 +129,12 @@ class Session:
         개인정보로 갈아 끼우면 통과했다. 업스트림이 나중에 서명 불일치로 거부해도
         원문은 이미 나간 뒤다. 짝으로 기억해 본문까지 대조한다.
         """
-        if signature:
-            self._emitted[signature] = body
+        if not signature:
+            return
+        # 추론 본문도 메모리를 먹는다. 상한 없이 쌓으면 긴 대화에서 계속 는다.
+        if len(self._emitted) >= _MAX_EMITTED and signature not in self._emitted:
+            self._emitted.clear()
+        self._emitted[signature] = body
 
     def emitted_thinking(self, signature: str, body: str) -> bool:
         return self._emitted.get(signature) == body
@@ -192,8 +200,14 @@ class Session:
         뒤 = text[start + len(value)] if start + len(value) < len(text) else ""
 
         if "가" <= value[0] <= "힣":
-            # 한글 값(이름)은 앞경계만 본다. "박이준" 안의 "이준" 은 다른 사람이다.
-            return not ("가" <= 앞 <= "힣")
+            # 두 글자 이름만 앞경계를 본다. "박이준" 안의 "이준" 은 다른 사람이라
+            # 가르면 안 되기 때문이다.
+            #
+            # 세 글자 이상이면 보지 않는다. 앞경계를 모든 길이에 적용했더니
+            # "고객명김수현" 처럼 앵커 낱말이 이름에 바짝 붙은 자리에서 이미
+            # 아는 값이 다시 새어나갔다. 세 글자가 우연히 다른 이름 안에 통째로
+            # 들어앉을 확률은 훨씬 낮고, 유출은 훼손보다 나쁘다.
+            return len(value) >= 3 or not ("가" <= 앞 <= "힣")
 
         # 숫자로 시작하는 값은 앞뒤로 숫자가 붙으면 안 된다. 경계를 아예 두지
         # 않았더니 세션이 아는 계좌번호가 더 긴 주문번호 가운데를 갈랐다 —
