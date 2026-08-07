@@ -1,6 +1,7 @@
 """마스킹·복원 계층 테스트."""
 
-from sumunjang.mask import Session, mask, restore
+from sumunjang.detect import CATEGORIES
+from sumunjang.mask import SEVERITY, Session, mask, restore
 
 
 def test_주민등록번호를_placeholder로_치환한다():
@@ -44,3 +45,53 @@ def test_모델_답변에_섞인_placeholder만_골라_복원한다():
     answer = "고객님 번호 [전화번호_1] 로 발송했습니다. 문제 없으면 회신 주세요."
 
     assert restore(answer, session) == "고객님 번호 010-1234-5678 로 발송했습니다. 문제 없으면 회신 주세요."
+
+
+def test_탐지가_겹쳐도_뒤쪽_구간이_평문으로_남지_않는다():
+    """겹치는 탐지를 "앞선 것이 이겼으니 뒤는 버린다"로 처리하면 부분 유출이 된다.
+
+    아래 입력에서 전화번호(010-9921-3348)와 카드번호(9921-3348-0000-0002)가
+    8자리를 공유한다. 전화번호만 가리고 카드 탐지를 버리면 카드 뒷 8자리가
+    그대로 남는다. 겹치는 구간은 합집합으로 가려야 한다.
+    """
+    session = Session()
+
+    masked = mask("연락처 010-9921-3348-0000-0002 입니다", session)
+
+    assert "0000-0002" not in masked
+    assert "9921" not in masked
+
+
+def test_겹친_구간은_더_민감한_쪽의_라벨을_받는다():
+    """전화번호와 카드번호가 겹치면 카드번호로 부른다.
+
+    서열의 축은 "이 값 하나로 다른 문을 얼마나 열 수 있는가, 그 자물쇠를 바꿀 수
+    있는가" 하나다. 카드번호는 금전을 열고 재발급이 되지만, 전화번호는 본인인증
+    2차 채널이라 열리는 문이 더 적다.
+    """
+    session = Session()
+
+    masked = mask("연락처 010-9921-3348-0000-0002 입니다", session)
+
+    assert masked == "연락처 [카드번호_1] 입니다"
+
+
+def test_주민등록번호가_섞이면_언제나_주민등록번호로_부른다():
+    """가장 민감한 것이 라벨을 가져간다 — 서열 1위는 유출 시 되돌릴 수 없기 때문이다."""
+    session = Session()
+
+    masked = mask("문의자 900101-1234568kim@example.com", session)
+
+    assert masked == "문의자 [주민등록번호_1]"
+
+
+def test_모든_탐지_카테고리가_민감도_표에_들어_있다():
+    """탐지기를 늘리면서 서열을 빠뜨리면 여기서 먼저 걸린다.
+
+    빠진 카테고리는 런타임에서는 가장 민감한 쪽으로 취급되므로 유출로는 이어지지
+    않지만, 라벨이 조용히 틀어진다. 조용한 오류를 시끄러운 실패로 바꿔 둔다.
+    """
+    assert set(CATEGORIES) == set(SEVERITY), (
+        f"서열에 없는 카테고리: {set(CATEGORIES) - set(SEVERITY)} / "
+        f"탐지기에 없는 카테고리: {set(SEVERITY) - set(CATEGORIES)}"
+    )

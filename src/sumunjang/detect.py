@@ -153,6 +153,11 @@ _RULES = (
     ("SECRET", _SECRET_PATTERN, None),
 )
 
+# 이 탐지기가 붙일 수 있는 카테고리 전부. 마스킹 계층이 카테고리마다 정책을
+# 갖고 있어서, 규칙을 늘렸는데 정책을 빠뜨리면 조용히 어긋난다. 표를 하나로
+# 두고 테스트가 대조하게 한다.
+CATEGORIES = tuple(category for category, _, _ in _RULES)
+
 
 def detect(text: str) -> list[Finding]:
     """텍스트에서 한국 개인정보·시크릿을 찾아 원문 좌표로 돌려준다."""
