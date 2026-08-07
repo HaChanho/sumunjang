@@ -155,9 +155,18 @@ def _openai_sse(message: dict) -> bytes:
         chunks.append(조각({"role": answer.get("role", "assistant")}))
         if answer.get("content"):
             chunks.append(조각({"content": answer["content"]}))
+        # 거절(refusal)을 빠뜨리면 거절 응답이 내용 없는 빈 스트림이 된다.
+        # 사용자는 왜 답이 안 왔는지 알 수 없다.
+        if answer.get("refusal"):
+            chunks.append(조각({"refusal": answer["refusal"]}))
         for n, call in enumerate(answer.get("tool_calls") or []):
             chunks.append(조각({"tool_calls": [{"index": n, **call}]}))
         chunks.append(조각({}, choice.get("finish_reason")))
+
+    # 사용량 청크. 통짜 응답에는 usage 가 있으므로 스트림에서도 흘려보낸다 —
+    # 버리면 토큰 수를 세는 클라이언트가 비용을 알 수 없다.
+    if message.get("usage"):
+        chunks.append({**본, "choices": [], "usage": message["usage"]})
 
     payload = b"".join(
         f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n".encode() for chunk in chunks
@@ -283,11 +292,19 @@ def create_app(
     sessions: dict[str, Session] = {}
     owns_client = client is None
 
+    # 세션 사전 자체에도 상한을 둔다. 자격증명마다 세션이 하나씩 생기므로
+    # 상한이 없으면 서로 다른 키로 두드리는 것만으로 메모리를 밀어낼 수 있다.
+    MAX_SESSIONS = 64
+
     def session_for(headers: dict) -> Session:
         credential = headers.get("x-api-key") or headers.get("authorization") or ""
         # 자격증명 자체를 키로 쓰지 않는다. 해시만 남기면 메모리 덤프에
         # API 키가 남지 않는다.
         key = hashlib.sha256(credential.encode()).hexdigest()
+        if key not in sessions and len(sessions) >= MAX_SESSIONS:
+            raise SessionFull(
+                f"세션 수 상한 {MAX_SESSIONS}개에 도달했습니다. 프록시를 다시 띄워 주세요."
+            )
         return sessions.setdefault(key, Session())
 
     async def app(scope, receive, send):
@@ -317,8 +334,6 @@ def create_app(
             )
             return
 
-        session = session_for(headers)
-
         raw = await _read_body(receive)
         try:
             body = json.loads(raw)
@@ -330,12 +345,12 @@ def create_app(
             )
             return
 
-        before = len(session)
-
         try:
             # dict 가 아닌 본문(배열·문자열·null)도 여기서 걸린다. 밖에 두면
             # AttributeError 가 ASGI 핸들러 밖으로 터져 설계한 응답 대신
             # 서버의 맨 500 이 나간다.
+            session = session_for(headers)
+            before = len(session)
             wants_stream = bool(body["stream"]) if "stream" in body else False
             masked = protocol.mask(body, session)
         except SessionFull as exc:

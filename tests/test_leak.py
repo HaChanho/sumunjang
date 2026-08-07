@@ -134,3 +134,65 @@ def test_말뭉치가_그물_노릇을_할_수_있는_상태다():
     assert without_spans, "오탐 함정 문서가 없다 — 정밀도를 물어볼 기회가 없다"
     for document in with_spans:
         assert all(_secrets_of(document)), f"{document.doc_id}: 빈 정답 값이 있다"
+
+
+def _우회표기(값: str) -> dict[str, str]:
+    """같은 값을 눈에는 같아 보이게 다르게 쓴 것들."""
+    import re
+    import unicodedata
+
+    표기 = {
+        "제로폭 삽입": 값[:3] + "\u200b" + 값[3:],
+        "보이지 않는 구분자": 값[:2] + "\u2063" + 값[2:],
+        "soft hyphen": 값[:4] + "\u00ad" + 값[4:],
+        "자모 분해(NFD)": unicodedata.normalize("NFD", 값),
+    }
+
+    # 전각은 숫자로 이루어진 식별자에만 의미가 있다. API 키를 전각으로 바꾸면
+    # 그것은 더 이상 작동하는 키가 아니므로 가려서 보호할 것이 없다.
+    if re.fullmatch(r"[\d+\-. ]+", 값):
+        표기["전각"] = 값.translate(str.maketrans("0123456789", "０１２３４５６７８９"))
+    return 표기
+
+
+def test_우회_표기로_써도_원문이_남지_않는다():
+    """보이지 않는 문자·자모 분해·전각은 전부 같은 값을 다르게 쓴 것이다.
+
+    목록으로 막다 계속 뚫려서 유니코드 범주로 막았다. 그 보증을 골든셋 전체에
+    걸어 회귀를 감시한다.
+    """
+    residue: list[tuple[str, str, str]] = []
+
+    for document in _documents():
+        for secret in _secrets_of(document):
+            for 방식, 변형 in _우회표기(secret).items():
+                masked = mask(f"담당: {변형}", Session())
+                # 변형된 표기가 통째로 남았는지 본다.
+                if 변형 in masked:
+                    residue.append((document.doc_id, 방식, secret))
+
+    assert residue == [], f"우회 표기가 가려지지 않았다: {residue[:5]}"
+
+
+def test_원문이_부분적으로도_남지_않는다():
+    """"절반만 가림" 은 통째 잔존 검사를 그냥 통과한다.
+
+    정규화 지도가 시작만 기록하던 시절 "김수현" 이 "[이름_1]ᅧᆫ" 으로 남았고,
+    `secret in masked` 검사는 이것을 초록불로 통과시켰다. 가명 표시를 걷어낸
+    나머지에 원문 조각이 있는지를 본다.
+    """
+    import re
+
+    조각남: list[tuple[str, str]] = []
+
+    for document in _documents():
+        masked = mask(document.text, Session())
+        # 가명 표시를 지운 자리에 원문 조각이 남아 있으면 안 된다.
+        남은것 = re.sub(r"\[[^\]]+_\d+\]", "", masked)
+        for secret in _secrets_of(document):
+            # 값의 뒤쪽 절반이 남아 있으면 부분 유출이다.
+            뒤쪽 = secret[len(secret) // 2 :]
+            if len(뒤쪽) >= 4 and 뒤쪽 in 남은것:
+                조각남.append((document.doc_id, secret))
+
+    assert 조각남 == [], f"원문 조각이 남았다: {조각남}"

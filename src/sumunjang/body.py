@@ -22,46 +22,54 @@ from typing import Any
 
 from .mask import Session, mask
 
-# 마스킹에서 제외하는 자리. 기준은 하나다 — **사람이 쓴 텍스트가 아니면서,
+# 마스킹에서 제외하는 자리. 기준은 하나다 — **사람이 쓸 수 없는 자리이면서,
 # 훼손되면 요청 자체가 깨지는 값.** 그 밖의 모든 문자열은 가린다.
 #
-#   signature                     추론 블록의 서명. 한 글자만 바뀌어도 다음 턴이 400 이 된다.
-#   id, tool_use_id, tool_call_id 프로토콜이 만든 불투명 토큰. 여기서의 패턴 일치는
-#                                 정의상 오탐이고, 가리면 짝이 어긋나 요청이 거부된다.
-#   url                           가려진 주소는 해석되지 않아 첨부가 깨진다. data: URI
-#                                 형태로 base64 덩어리가 실리기도 한다.
-#   data                          base64 첨부의 알맹이. 형제 필드 type 이 base64 일 때만
-#                                 건너뛴다 — type 이 text 인 document 블록의 data 는
-#                                 사람이 쓴 글이므로 가린다.
+#   signature      추론 블록의 서명. 한 글자만 바뀌어도 다음 턴이 400 이 된다.
+#   tool_use_id    도구 호출과 결과를 잇는 토큰. 프로토콜이 만들며 사람이 쓰지 않는다.
+#   tool_call_id   같음(OpenAI 쪽 이름).
+#   data           base64 첨부의 알맹이. 형제 필드 type 이 base64 일 때만 건너뛴다 —
+#                  type 이 text 인 document 블록의 data 는 사람이 쓴 글이므로 가린다.
 #
-# url 을 빼는 것은 대가가 있다. 주소 안에 개인정보가 들어 있으면 그대로 나간다.
-# 다만 그것은 드물고, 첨부가 깨지는 것은 확실하다. README 한계에 적어 둔다.
-_OPAQUE_KEYS = frozenset({"signature", "id", "tool_use_id", "tool_call_id", "url"})
+# 한때 url 과 id 도 여기 있었다. "가리면 첨부가 깨진다" 는 이유였는데 그것이 틀렸다.
+# **깨지는 것은 눈에 보이고 유출은 보이지 않는다.** 주소 안의 개인정보는 업스트림이
+# 그 주소를 가져가는 순간 그대로 넘어가므로, 가려서 요청이 실패하는 편이 안전한
+# 실패다. id 는 metadata.id 처럼 사람이 채우는 자리에도 쓰이는 흔한 이름이라
+# 통째로 빼면 구멍이 된다. 같은 값은 같은 가명을 받으므로 짝은 어긋나지 않는다.
+_OPAQUE_KEYS = frozenset({"signature", "tool_use_id", "tool_call_id"})
+
+# data: URI 는 주소가 아니라 알맹이를 담은 덩어리다. 가리면 첨부가 훼손된다.
+_DATA_URI = "data:"
 
 
-def _is_opaque(key: str, parent: dict) -> bool:
+def _is_opaque(key: str, value: str, parent: dict) -> bool:
     if key in _OPAQUE_KEYS:
         return True
-    # {"type": "base64", "media_type": ..., "data": "<덩어리>"}
-    return key == "data" and parent.get("type") == "base64"
+    if key == "data" and parent.get("type") == "base64":
+        return True
+    # https:// 주소는 가린다. data: URI 만 예외다.
+    return key == "url" and value.startswith(_DATA_URI)
 
 
 def mask_everything(node: Any, session: Session, parent: dict | None = None, key: str = "") -> Any:
     """본문을 재귀로 훑어 모든 문자열을 가린다.
 
-    사본을 만들지 않고 제자리에서 바꾼다. 호출자가 미리 깊은 복사를 해 두므로
-    원본 요청은 그대로 남는다.
+    사전은 키까지 바꿔야 하므로 새로 만들고, 나머지는 제자리에서 바꾼다.
+    호출자가 미리 깊은 복사를 해 두므로 원본 요청은 그대로 남는다.
     """
     if isinstance(node, dict):
-        for child_key, value in node.items():
-            node[child_key] = mask_everything(value, session, node, child_key)
-        return node
+        # 키도 사람이 쓸 수 있다. 도구 입력 스키마의 속성 이름이 그렇다.
+        return {
+            mask(child_key, session) if isinstance(child_key, str) else child_key:
+                mask_everything(value, session, node, child_key)
+            for child_key, value in node.items()
+        }
 
     if isinstance(node, list):
         return [mask_everything(item, session, parent, key) for item in node]
 
     if isinstance(node, str):
-        if parent is not None and _is_opaque(key, parent):
+        if parent is not None and _is_opaque(key, node, parent):
             return node
         return mask(node, session)
 

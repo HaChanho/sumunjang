@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass
 
 # 주민등록번호 뒷자리 검증에 쓰는 가중치.
@@ -26,7 +27,7 @@ _RRN_PATTERN = re.compile(r"(?<!\d)\d{6}-?\d{7}(?!\d)")
 # 숫자를 인식하지만 리터럴 "0" 은 "０" 과 다른 코드포인트라 전각 표기를 놓쳤다.
 # 통신사 식별번호 확인은 패턴이 아니라 _phone_valid 가 한다.
 _PHONE_PATTERN = re.compile(
-    r"(?:(?<!\d)\d|\+82[-.\s]?)\d{2}[-.\s]?\d{3,4}[-.\s]?\d{4}(?!\d)"
+    r"(?:(?<!\d)\d|\+\d\d[-.\s]?)\d{2}[-.\s]?\d{3,4}[-.\s]?\d{4}(?!\d)"
 )
 
 # 국내 휴대전화 식별번호. 010 이 대부분이고 나머지는 번호이동 전 구번호다.
@@ -46,7 +47,7 @@ _EMAIL_PATTERN = re.compile(r"[\w.+-]{1,64}@[\w-]{1,63}(?:\.[\w-]{1,63}){0,8}\.[
 # 14자리(4-6-4)다. 16자리만 받으면 그 둘이 평문으로 나간다.
 # 자릿수·카드사 대역·Luhn 검사는 _card_valid 가 한다.
 _CARD_PATTERN = re.compile(
-    r"(?<!\d)\d{4}[-\s]?\d{4,6}[-\s]?\d{4,5}(?:[-\s]?\d{1,4})?(?!\d)"
+    r"(?<!\d)\d{4}[-\s]?\d{4,6}[-\s]?\d{4,5}(?:[-\s]?\d{1,7})?(?!\d)"
 )
 
 # 사업자등록번호: 3-2-5 형식
@@ -146,14 +147,37 @@ def _anchored(anchors: str, value: str, gap: str = _GAP_LOOSE) -> re.Pattern[str
     return re.compile(rf"(?:{anchors}){gap}(?P<value>{value})")
 
 
-# 눈에 보이지 않아 탐지를 빠져나가는 문자들. 전각 숫자는 별도 처리가 필요 없다 —
-# 파이썬 정규식의 \d와 int()가 유니코드 십진 숫자를 그대로 인식하기 때문이다.
-_INVISIBLE = (
-    "\u200b\u200c\u200d\u2060\ufeff"      # 제로폭 공백·비접합·접합·단어결합·BOM
-    "\u2061\u2062\u2063\u2064"          # 보이지 않는 함수 적용·곱셈·구분자·덧셈
-    "\u00ad"                             # soft hyphen — 줄바꿈 힌트라 화면에 안 보인다
-    "\u180e\u200e\u200f\u202a\u202b\u202c\u202d\u202e"  # 몽골 모음 구분자, 양방향 제어
-)
+# 눈에 보이지 않아 탐지를 빠져나가는 문자들.
+#
+# 목록으로 관리하다 계속 뚫렸다. U+200B 를 막으면 U+2063 으로, 그것을 막으면
+# U+00AD·U+2066·U+034F 로 우회한다. 목록은 언제나 공격자보다 늦다.
+#
+# 그래서 부류로 막는다. 유니코드 범주 Cf(format)는 서식 제어 문자 전체이고,
+# Mn(nonspacing mark) 중 폭이 0인 것은 결합 문자다. 이 둘을 걷어내면 "보이지
+# 않는 문자를 끼워 넣는다" 는 우회 수단 자체가 닫힌다.
+#
+# 전각 숫자는 이 처리가 필요 없다 — 정규식의 \d 와 int() 가 유니코드 십진
+# 숫자를 그대로 인식한다.
+
+
+def _invisible(char: str) -> bool:
+    category = unicodedata.category(char)
+    return category == "Cf" or (category == "Mn" and unicodedata.combining(char) == 0)
+
+
+# 한글 자모 중 앞 글자에 붙어 한 음절을 이루는 것들. 중성(V)과 종성(T)이다.
+# 이들은 결합 문자(combining class 0 이 아님)가 아니라 독립 코드포인트라
+# unicodedata.combining() 으로는 잡히지 않는다. NFD 로 분해된 "김" 은
+# ㄱ+ㅣ+ㅁ 세 코드포인트인데 셋 다 결합 클래스가 0 이다.
+_JAMO_MEDIAL = range(0x1161, 0x1176)
+_JAMO_FINAL = range(0x11A8, 0x11C3)
+
+
+def _joins_previous(char: str) -> bool:
+    if unicodedata.combining(char) != 0:
+        return True
+    code = ord(char)
+    return code in _JAMO_MEDIAL or code in _JAMO_FINAL
 
 
 @dataclass(frozen=True)
@@ -165,27 +189,56 @@ class Finding:
     end: int
 
 
-def _strip_invisible(text: str) -> tuple[str, list[int]]:
-    """보이지 않는 문자를 걷어낸 텍스트와, 각 글자가 원문 어디서 왔는지의 인덱스.
+def _normalize(text: str) -> tuple[str, list[int], list[int]]:
+    """탐지용 텍스트와, 각 글자가 원문 어디서 왔는지의 지도.
+
+    두 가지를 편다. 보이지 않는 문자를 걷어내고, 한글 자모 분해(NFD)를 완성형
+    (NFC)으로 합친다. macOS 가 만든 파일명이나 일부 입력기가 NFD 를 내보내므로
+    "김수현" 이 눈에는 같아 보이는데 코드포인트가 달라 사전과 어긋난다.
 
     마스킹은 언제나 원문 좌표 위에서 일어나야 하므로 정규화된 문자열만으로는
     부족하다. 되돌아갈 지도를 함께 들고 다닌다.
+
+    지도는 시작과 끝을 **둘 다** 적는다. 시작만 적었더니 NFC 가 세 코드포인트를
+    한 글자로 합친 자리에서 끝이 한 칸으로 계산돼, "김수현" 이 "[이름_1]ᅧᆫ" 으로
+    반쯤 남았다. 합쳐진 글자의 원문 끝은 시작 + 1 이 아니다.
     """
-    if not any(ch in _INVISIBLE for ch in text):
-        return text, list(range(len(text)))
-    chars, origin = [], []
-    for index, char in enumerate(text):
-        if char in _INVISIBLE:
+    chars: list[str] = []
+    starts: list[int] = []
+    ends: list[int] = []
+
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if _invisible(char):
+            index += 1
             continue
-        chars.append(char)
-        origin.append(index)
-    return "".join(chars), origin
+
+        # 이 글자에 이어지는 결합 문자까지 한 덩어리로 모아 NFC 로 합친다.
+        end = index + 1
+        while end < len(text) and _joins_previous(text[end]):
+            end += 1
+        composed = unicodedata.normalize("NFC", text[index:end])
+
+        합쳐짐 = len(composed) < end - index
+        for offset, composed_char in enumerate(composed):
+            chars.append(composed_char)
+            if 합쳐짐:
+                # 이 한 글자가 원문 [index, end) 전체에서 왔다.
+                starts.append(index)
+                ends.append(end)
+            else:
+                starts.append(index + offset)
+                ends.append(index + offset + 1)
+        index = end
+
+    return "".join(chars), starts, ends
 
 
 def _digits(text: str) -> str:
-    """숫자만 남기고 전각을 반각으로 맞춘다.
+    r"""숫자만 남기고 전각을 반각으로 맞춘다.
 
-    정규식의 \\d 와 int() 는 유니코드 십진 숫자를 그대로 인식하지만, 검증기가
+    정규식의 \d 와 int() 는 유니코드 십진 숫자를 그대로 인식하지만, 검증기가
     자릿값을 ASCII 문자와 비교하는 자리가 있다(주민등록번호 성별코드 표).
     거기서 전각이 조용히 빠져나가므로 한 곳에서 맞춰 둔다.
     """
@@ -193,14 +246,18 @@ def _digits(text: str) -> str:
 
 
 def _phone_valid(matched: str) -> bool:
-    """통신사 식별번호와 자릿수를 본다.
+    r"""통신사 식별번호와 자릿수를 본다.
 
-    패턴에서 리터럴 0·1 을 빼고 \\d 로 바꾼 대신 여기서 확인한다. 리터럴은
+    패턴에서 리터럴 0·1 을 빼고 \d 로 바꾼 대신 여기서 확인한다. 리터럴은
     전각 "０" 을 놓쳤다.
     """
     digits = _digits(matched)
     if "+" in matched:
-        # 국가번호를 붙이면 앞의 0 이 빠진다 (+82-10-... = 010-...)
+        # 국가번호를 붙이면 앞의 0 이 빠진다 (+82-10-... = 010-...).
+        # 국가번호 자리도 \d 로 받는 이유는 전각 때문이다 — 리터럴 "82" 는
+        # "８２" 를 놓친다. 대한민국 번호만 다루므로 값으로 확인한다.
+        if digits[:2] != "82":
+            return False
         digits = "0" + digits[2:]
     return digits.startswith(_PHONE_PREFIXES) and len(digits) in (10, 11)
 
@@ -288,8 +345,9 @@ def _card_valid(matched: str) -> bool:
     같은 원칙이다. 증거가 없으면 관문을 더 요구한다.
     """
     digits = _digits(matched)
-    # 국제 카드번호는 13~19자리지만 실제로 쓰이는 것은 14(Diners)·15(Amex)·16 이다.
-    if len(digits) not in (14, 15, 16):
+    # ISO/IEC 7812 는 13~19자리를 허용한다. 16자리만 받았다가 Amex(15)·Diners(14)를
+    # 놓쳤고, 14~16 으로 넓혔다가 구 Visa(13)·UnionPay(19)를 놓쳤다. 규격대로 연다.
+    if not 13 <= len(digits) <= 19:
         return False
     head = digits[0]
 
@@ -364,7 +422,7 @@ CATEGORIES = tuple(category for category, _, _ in _RULES)
 
 def detect(text: str) -> list[Finding]:
     """텍스트에서 한국 개인정보·시크릿을 찾아 원문 좌표로 돌려준다."""
-    scan_text, origin = _strip_invisible(text)
+    scan_text, starts, ends = _normalize(text)
     findings = []
 
     for category, pattern, validator in _RULES:
@@ -377,8 +435,8 @@ def detect(text: str) -> list[Finding]:
             findings.append(
                 Finding(
                     category=category,
-                    start=origin[match.start(group)],
-                    end=origin[match.end(group) - 1] + 1,
+                    start=starts[match.start(group)],
+                    end=ends[match.end(group) - 1],
                 )
             )
 

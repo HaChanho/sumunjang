@@ -84,25 +84,46 @@ def test_훼손되면_요청이_깨지는_자리는_건드리지_않는다():
     assert 나간것["messages"][1]["content"][0]["source"]["data"] == base64덩어리
 
 
-def test_짝이_어긋나면_요청이_깨지는_식별자는_가리지_않는다():
-    """프로토콜이 만든 불투명 토큰에서의 패턴 일치는 정의상 오탐이다.
+def test_주소_안의_개인정보도_가린다():
+    """한때 url 을 예외로 뒀다가 되돌렸다.
 
-    tool_use_id 안의 숫자열이 우연히 주민등록번호 검증식을 통과하면, 가리는 순간
-    tool_use 와 tool_result 의 짝이 어긋나 업스트림이 요청을 거부한다.
-    이득은 0이고 손해는 확실하다. url 도 같다 — 가려진 주소는 해석되지 않는다.
+    "가리면 첨부가 깨진다" 는 이유였는데 그 판단이 틀렸다. 깨지는 것은 눈에 보이고
+    유출은 보이지 않는다. 주소 안의 개인정보는 업스트림이 그 주소를 가져가는 순간
+    그대로 넘어가므로, 가려서 요청이 실패하는 편이 안전한 실패다.
     """
-    아이디 = "toolu_9001011234568"
-    주소 = "https://cdn.example.com/a@b.co/x.png"
     body = {"messages": [{"role": "user", "content": [
-        {"type": "tool_result", "tool_use_id": 아이디, "content": "결과"},
-        {"type": "image", "source": {"type": "url", "url": 주소}},
-    ]}]}
+        {"type": "image", "source": {"type": "url", "url": f"https://x.example.com/{원문}/a.png"}}]}]}
+
+    assert 원문 not in _나간본문(anthropic_mask, body)
+
+
+def test_data_URI_는_가리지_않는다():
+    """data: 는 주소가 아니라 알맹이를 담은 덩어리다. 가리면 첨부가 훼손된다."""
+    덩어리 = "data:image/png;base64," + "iVBORw0KGgoAAAANSUhEUg" * 4
+    body = {"messages": [{"role": "user", "content": [
+        {"type": "image_url", "image_url": {"url": 덩어리}}]}]}
+
+    나간것 = openai_mask(body, Session())
+
+    assert 나간것["messages"][0]["content"][0]["image_url"]["url"] == 덩어리
+
+
+def test_사전의_키도_가린다():
+    """도구 입력 스키마의 속성 이름처럼 키에도 사람이 쓴 값이 들어간다."""
+    body = {"messages": [], "tools": [{"input_schema": {"properties": {원문: {"type": "string"}}}}]}
+
+    assert 원문 not in _나간본문(anthropic_mask, body)
+
+
+def test_도구_호출을_잇는_토큰은_가리지_않는다():
+    """프로토콜이 만들고 사람이 쓰지 않는 자리다. 훼손되면 짝이 어긋난다."""
+    아이디 = "toolu_9001011234568"
+    body = {"messages": [{"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": 아이디, "content": "결과"}]}]}
 
     나간것 = anthropic_mask(body, Session())
 
-    블록 = 나간것["messages"][0]["content"]
-    assert 블록[0]["tool_use_id"] == 아이디
-    assert 블록[1]["source"]["url"] == 주소
+    assert 나간것["messages"][0]["content"][0]["tool_use_id"] == 아이디
 
 
 def test_구조를_가리키는_값은_손상되지_않는다():

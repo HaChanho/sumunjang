@@ -460,6 +460,51 @@ def test_OpenAI_스트리밍은_복원된_내용을_data_줄로_돌려준다():
         for line in 본문.splitlines()
         if line.startswith("data: ") and line != "data: [DONE]"
     ]
-    모인글 = "".join(c["choices"][0]["delta"].get("content", "") for c in 조각들)
+    # 사용량 청크는 choices 가 빈 배열이다 — OpenAI 규약대로다.
+    모인글 = "".join(
+        c["choices"][0]["delta"].get("content", "") for c in 조각들 if c["choices"]
+    )
     assert "900101-1234568" in 모인글
-    assert 조각들[-1]["choices"][0]["finish_reason"] == "stop"
+    마지막_내용청크 = [c for c in 조각들 if c["choices"]][-1]
+    assert 마지막_내용청크["choices"][0]["finish_reason"] == "stop"
+
+
+def test_OpenAI_스트리밍이_거절과_사용량을_잃지_않는다():
+    """거절을 빠뜨리면 거절 응답이 내용 없는 빈 스트림이 된다."""
+    upstream = OpenAIUpstream()
+
+    async def 거절응답(scope, receive, send):
+        while True:
+            message = await receive()
+            if not message.get("more_body"):
+                break
+        payload = json.dumps({
+            "id": "chatcmpl-x", "object": "chat.completion", "model": "gpt-4o",
+            "choices": [{"index": 0, "message": {
+                "role": "assistant", "content": None, "refusal": "그 요청은 도와드릴 수 없습니다"},
+                "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 5, "total_tokens": 8},
+        }).encode()
+        await send({"type": "http.response.start", "status": 200,
+                    "headers": [(b"content-type", b"application/json")]})
+        await send({"type": "http.response.body", "body": payload})
+
+    async def 왕복():
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=거절응답), base_url="http://upstream"
+        ) as up:
+            app = create_app(upstream_base_url="http://upstream", client=up)
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://proxy"
+            ) as proxy_client:
+                return await proxy_client.post(
+                    "/v1/chat/completions",
+                    json={"model": "gpt-4o", "stream": True,
+                          "messages": [{"role": "user", "content": "안녕"}]},
+                )
+
+    본문 = asyncio.run(왕복()).text
+
+    assert "그 요청은 도와드릴 수 없습니다" in 본문
+    assert "total_tokens" in 본문
+    assert 본문.rstrip().endswith("data: [DONE]")
