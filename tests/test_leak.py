@@ -21,7 +21,12 @@ from sumunjang.anthropic import mask_request
 from sumunjang.goldenset import Document, load_directory
 from sumunjang.mask import Session, mask
 
-GOLDENSET = Path(__file__).resolve().parent.parent / "goldenset"
+ROOT = Path(__file__).resolve().parent.parent
+
+# 탐지한다고 주장하는 범위의 골든셋만 넣는다. goldenset-gaps/ 는 못 잡는다고
+# 선언한 것들이라 여기 넣으면 이 파일이 영구히 붉은 채로 남는다 — 그쪽은
+# report 가 0점으로 공표하는 방식으로 정직함을 지킨다.
+GOLDENSETS = (ROOT / "goldenset", ROOT / "goldenset-hard")
 
 
 def _secrets_of(document: Document) -> list[str]:
@@ -30,8 +35,8 @@ def _secrets_of(document: Document) -> list[str]:
 
 
 def _documents() -> list[Document]:
-    documents = load_directory(GOLDENSET)
-    assert documents, f"골든셋이 비어 있다: {GOLDENSET}"
+    documents = [doc for directory in GOLDENSETS for doc in load_directory(directory)]
+    assert documents, f"골든셋이 비어 있다: {GOLDENSETS}"
     return documents
 
 
@@ -84,13 +89,20 @@ def test_업스트림으로_나가는_요청_본문에_원문이_남지_않는�
     assert residue == [], f"업스트림 본문에 원문이 남았다: {residue}"
 
 
-def test_어느_정답값도_빈_문자열이_아니다():
+def test_말뭉치가_그물_노릇을_할_수_있는_상태다():
     """앞의 두 테스트가 공허하게 통과하지 않는지 확인한다.
 
-    정답 값이 빈 문자열이면 `secret in masked` 는 언제나 참이 되고, 스팬이
-    비어 있으면 언제나 거짓이 된다. 어느 쪽이든 그물이 뚫린 채로 초록불이 켜진다.
+    정답 값이 빈 문자열이면 `secret in masked` 는 언제나 참이고, 정답이 하나도
+    없으면 언제나 거짓이다. 어느 쪽이든 그물이 뚫린 채로 초록불이 켜진다.
+
+    정답이 0건인 문서는 정상이다 — 오탐 함정 문서가 그렇다. 오히려 그런 문서가
+    하나도 없으면 정밀도를 물어볼 기회 자체가 없다는 뜻이라 함께 확인한다.
     """
-    for document in _documents():
-        secrets = _secrets_of(document)
-        assert secrets, f"{document.doc_id}: 정답 스팬이 없다"
-        assert all(secrets), f"{document.doc_id}: 빈 정답 값이 있다"
+    documents = _documents()
+    with_spans = [d for d in documents if d.spans]
+    without_spans = [d for d in documents if not d.spans]
+
+    assert with_spans, "정답이 있는 문서가 하나도 없다"
+    assert without_spans, "오탐 함정 문서가 없다 — 정밀도를 물어볼 기회가 없다"
+    for document in with_spans:
+        assert all(_secrets_of(document)), f"{document.doc_id}: 빈 정답 값이 있다"

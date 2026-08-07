@@ -4,7 +4,7 @@
 체크섬 검증 로직을 실제로 시험하기 위해 검증식은 통과하도록 계산했다.
 """
 
-from sumunjang.detect import detect
+from sumunjang.detect import _luhn_ok, detect
 
 
 def test_체크섬이_유효한_주민등록번호를_탐지한다():
@@ -128,6 +128,97 @@ def test_전각_숫자로_쓴_주민등록번호도_탐지한다():
     assert len(findings) == 1
     assert findings[0].category == "RRN"
     assert text[findings[0].start : findings[0].end] == "９００１０１-１２３４５６８"
+
+
+def test_하이픈_없이_붙여쓴_주민등록번호도_탐지한다():
+    """DB 컬럼과 로그에는 하이픈 없이 13자리로 들어가 있는 경우가 흔하다."""
+    text = "INSERT INTO members (rrn) VALUES ('8803121000068')"
+
+    findings = detect(text)
+
+    rrns = [f for f in findings if f.category == "RRN"]
+    assert len(rrns) == 1
+    assert text[rrns[0].start : rrns[0].end] == "8803121000068"
+
+
+def test_하이픈이_없으면_검증식까지_통과해야_주민등록번호로_본다():
+    """하이픈은 그 자체가 "주민번호를 쓰려는 의도"의 증거다.
+
+    증거가 없는 13자리 숫자에까지 "체크섬 또는 생년월일" 을 적용하면 오탐이
+    터진다. 그래서 하이픈이 없을 때는 두 관문을 모두 요구한다.
+
+    대가가 있다. 2020.10 이후 발급분은 뒷자리가 임의번호라 체크섬을 통과하지
+    않으므로, 하이픈 없이 쓰면 잡히지 않는다. 아래 값이 바로 그 세대다.
+    문맥 앵커(앞에 "주민번호" 같은 말이 붙는 경우)로 메워야 할 자리다.
+    """
+    text = "코드 0411303912345 처리 완료"
+
+    findings = detect(text)
+
+    assert [f for f in findings if f.category == "RRN"] == []
+
+
+def test_밀리초_타임스탬프를_주민등록번호로_오탐하지_않는다():
+    """epoch_ms 는 13자리다. 로그마다 있으므로 오탐하면 즉시 소음이 된다.
+
+    2020~2030년대 밀리초 타임스탬프는 앞 6자리의 3·4번째 자리가 언제나 12를
+    넘어 월(月)로 성립하지 않는다. 생년월일 관문이 통째로 걸러낸다.
+    """
+    text = "epoch_ms=1754500951000 epoch_s=1754500951"
+
+    findings = detect(text)
+
+    assert [f for f in findings if f.category == "RRN"] == []
+
+
+def test_점으로_구분한_전화번호도_탐지한다():
+    text = "직통 010.9876.5432 으로 연락 주세요"
+
+    findings = detect(text)
+
+    assert len(findings) == 1
+    assert findings[0].category == "PHONE"
+    assert text[findings[0].start : findings[0].end] == "010.9876.5432"
+
+
+def test_국가번호를_붙인_전화번호도_탐지한다():
+    """해외 지사·해외 결제 로그에서는 +82 표기로 들어온다. 앞의 0 은 빠진다."""
+    text = "담당자 직통: +82-10-2255-8830"
+
+    findings = detect(text)
+
+    assert len(findings) == 1
+    assert findings[0].category == "PHONE"
+    assert text[findings[0].start : findings[0].end] == "+82-10-2255-8830"
+
+
+def test_카드사_식별번호가_아니면_카드번호로_보지_않는다():
+    """Luhn 은 16자리 중 10분의 1을 그냥 통과시킨다. 전표번호가 그렇게 걸린다.
+
+    카드번호 첫 자리는 카드사를 가리키는 번호(3 항공·여행, 4 Visa, 5 Mastercard,
+    6 Discover·UnionPay)로 정해져 있다. 그 밖의 숫자로 시작하면 카드가 아니다.
+    """
+    text = "전표번호 2026-0000-0000-0006 확인"
+
+    findings = detect(text)
+
+    assert [f for f in findings if f.category == "CARD"] == []
+
+
+def test_국내전용_카드는_Luhn을_통과하지_않아도_탐지한다():
+    """국내전용(9로 시작) 카드는 검증번호 방식이 카드사마다 달라 Luhn 이 안 맞는다.
+
+    Luhn 만 관문으로 두면 한국 카드를 통째로 놓친다. 한국 특화 도구가 반드시
+    잡아야 하는 자리다.
+    """
+    text = "결제 카드 9410-1234-5678-9012 승인"
+    assert not _luhn_ok("9410123456789012"), "이 표본은 Luhn 을 통과하면 안 된다"
+
+    findings = detect(text)
+
+    cards = [f for f in findings if f.category == "CARD"]
+    assert len(cards) == 1
+    assert text[cards[0].start : cards[0].end] == "9410-1234-5678-9012"
 
 
 def test_제로폭_문자가_끼어든_주민등록번호도_원문_좌표로_탐지한다():

@@ -15,10 +15,16 @@ _RRN_WEIGHTS = (2, 3, 4, 5, 6, 7, 8, 9, 2, 3, 4, 5)
 # 숫자 식별자에는 모두 경계 조건을 붙인다. 앞뒤에 숫자가 붙어 있으면 더 긴 번호의
 # 일부일 뿐이다 — 견적번호 20260806-0012345 의 뒷부분이 주민번호 형태와 우연히
 # 일치하는 사례를 골든셋 채점에서 실제로 만났다.
-_RRN_PATTERN = re.compile(r"(?<!\d)\d{6}-\d{7}(?!\d)")
+# 하이픈은 선택이다. DB 컬럼과 로그에는 13자리로 붙여 쓴 형태가 흔하다.
+# 다만 하이픈 유무에 따라 요구하는 관문이 다르다 — _rrn_valid 참고.
+_RRN_PATTERN = re.compile(r"(?<!\d)\d{6}-?\d{7}(?!\d)")
 
-# 휴대전화: 010/011/016/017/018/019 + 3~4자리 + 4자리, 구분자는 하이픈/공백/없음
-_PHONE_PATTERN = re.compile(r"(?<!\d)01[016789][-\s]?\d{3,4}[-\s]?\d{4}(?!\d)")
+# 휴대전화: 010/011/016/017/018/019 + 3~4자리 + 4자리.
+# 구분자는 하이픈·점·공백·없음. 해외 지사에서 오는 +82 표기도 받는다
+# (국가번호를 붙이면 앞의 0 이 빠진다).
+_PHONE_PATTERN = re.compile(
+    r"(?:(?<!\d)0|\+82[-.\s]?)1[016789][-.\s]?\d{3,4}[-.\s]?\d{4}(?!\d)"
+)
 
 # 이메일. 최상위 도메인이 숫자면 이메일이 아니다 —
 # postgresql://app:pw@10.0.3.14 같은 접속 문자열을 걸러내기 위한 조건이다.
@@ -131,12 +137,46 @@ def _brn_checksum_ok(digits: str) -> bool:
 
 
 def _rrn_valid(matched: str) -> bool:
+    """하이픈이 있으면 관문 하나, 없으면 둘.
+
+    하이픈은 그 자체가 "주민등록번호를 쓰려는 의도"의 증거다. 증거가 없는 13자리
+    숫자에까지 관문 하나만 요구하면 오탐이 터진다 — 밀리초 타임스탬프와 상품
+    바코드가 모두 13자리다.
+
+    대가를 적어 둔다. 2020.10 이후 발급분은 뒷자리가 임의번호라 검증식을 통과하지
+    않으므로, 하이픈 없이 쓰면 잡히지 않는다.
+    """
     digits = matched.replace("-", "")
-    return _rrn_checksum_ok(digits) or _rrn_birthdate_ok(digits)
+    if "-" in matched:
+        return _rrn_checksum_ok(digits) or _rrn_birthdate_ok(digits)
+    return _rrn_checksum_ok(digits) and _rrn_birthdate_ok(digits)
 
 
 def _card_valid(matched: str) -> bool:
-    return _luhn_ok(re.sub(r"[-\s]", "", matched))
+    """첫 자리(카드사 식별번호)마다 물어야 할 것이 다르다.
+
+    Luhn 은 16자리 숫자 열 개 중 하나를 그냥 통과시킨다. 전표번호가 그렇게
+    걸리므로, 애초에 카드번호일 수 없는 대역을 먼저 잘라낸다.
+
+    9(국내전용)를 따로 두는 것이 한국에서 특히 중요하다. 국내전용 카드는
+    검증번호 산출 방식과 위치가 카드사마다 달라 **Luhn 이 적용되지 않는다.**
+    Luhn 만 관문으로 두면 국내전용 카드를 통째로 놓친다. 검증할 수단이 없으므로
+    사람이 구분자를 넣어 옮겨적은 형태일 때만 인정한다 — 하이픈 없는 RRN 과
+    같은 원칙이다. 증거가 없으면 관문을 더 요구한다.
+    """
+    digits = re.sub(r"[-\s]", "", matched)
+    head = digits[0]
+
+    if head == "9":
+        return bool(re.search(r"[-\s]", matched))
+    if head == "2":
+        # 2017년부터 Mastercard 가 쓰기 시작한 대역. 그 밖의 2 는 카드가 아니다.
+        return 2221 <= int(digits[:4]) <= 2720 and _luhn_ok(digits)
+    if head in "3456":
+        # 3 여행·엔터테인먼트(Amex·JCB·Diners), 4 Visa, 5 Mastercard,
+        # 6 Discover·UnionPay. 국제 브랜드는 Luhn 을 따른다.
+        return _luhn_ok(digits)
+    return False
 
 
 def _brn_valid(matched: str) -> bool:
