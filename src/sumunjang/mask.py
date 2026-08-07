@@ -15,6 +15,9 @@ from .detect import Finding, detect
 _LABELS = {
     "RRN": "주민등록번호",
     "NAME": "이름",
+    "ACCOUNT": "계좌번호",
+    "PASSPORT": "여권번호",
+    "LICENSE": "운전면허번호",
     "BRN": "사업자등록번호",
     "CARD": "카드번호",
     "PHONE": "전화번호",
@@ -69,7 +72,13 @@ class Session:
 #   RRN     한국 본인확인의 마스터키. 유출돼도 바꿀 수 없다 (개인정보보호법
 #           제24조의2가 처리 자체를 별도 법정주의로 묶어둔 이유이기도 하다).
 #   SECRET  그 뒤의 시스템 전체를 연다. 다만 회전으로 즉시 무효화할 수 있다.
+#   ACCOUNT 예금을 연다. 카드보다 위인 것은 자물쇠를 바꾸기가 더 어렵기
+#           때문이다 — 카드는 재발급이면 끝나지만 계좌를 바꾸려면 연결된
+#           자동이체와 급여 계좌를 전부 옮겨야 한다.
 #   CARD    금전을 연다. 재발급으로 무효화된다.
+#   LICENSE 국내 본인확인 수단이다. 휴대폰 개통·성인인증에 쓰인다.
+#   PASSPORT 신분 증명의 근거이지만 여는 문이 출입국 맥락에 한정된다.
+#           재발급하면 번호가 바뀐다.
 #   PHONE   본인인증 2차 채널(문자 OTP)을 연다. 바꾸는 비용이 크다.
 #   EMAIL   계정 복구 채널을 연다. 바꾸는 비용이 크다.
 #   NAME    그 자체로는 문을 열지 못한다. 동명이인이 흔해 단독으로는 특정도
@@ -79,7 +88,10 @@ class Session:
 # 라벨은 두 독자를 향한다. 모델에게는 가려진 자리가 무엇이었는지 알려 문맥을
 # 유지시키고, 로그를 보는 사람에게는 이 자리가 얼마나 위험했는지 알린다.
 # 겹쳤을 때 덜 민감한 이름을 붙이면 뒤쪽 독자가 위험을 과소평가한다.
-SEVERITY = ("RRN", "SECRET", "CARD", "PHONE", "EMAIL", "NAME", "BRN")
+SEVERITY = (
+    "RRN", "SECRET", "ACCOUNT", "CARD", "LICENSE", "PASSPORT",
+    "PHONE", "EMAIL", "NAME", "BRN",
+)
 
 
 def _merged_category(overlapping: list[Finding]) -> str:

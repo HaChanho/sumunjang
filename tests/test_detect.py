@@ -285,3 +285,97 @@ def test_앵커_뒤라도_성씨가_아니면_이름으로_보지_않는다():
     text = "담당: 미정\n분류: 환불 요청"
 
     assert [f for f in detect(text) if f.category == "NAME"] == []
+
+
+def test_앵커가_붙은_계좌번호를_탐지한다():
+    """계좌번호에는 검증식이 없고 형식도 은행마다 다르다. 앵커 없이는 못 잡는다."""
+    text = "환불 계좌: 국민은행 110-234-567890 (예금주 확인 요망)"
+
+    accounts = [f for f in detect(text) if f.category == "ACCOUNT"]
+
+    assert len(accounts) == 1
+    assert text[accounts[0].start : accounts[0].end] == "110-234-567890"
+
+
+def test_앵커가_없는_계좌_형태_숫자는_잡지_않는다():
+    """자릿수와 하이픈만으로 계좌번호를 판별하면 전표·일련번호가 다 걸린다."""
+    text = "정산 항목 110-234-567890 처리 완료"
+
+    assert [f for f in detect(text) if f.category == "ACCOUNT"] == []
+
+
+def test_여권번호를_구형과_차세대_형식_모두_탐지한다():
+    """2021년부터 영문자가 한 자리 늘었다 (M12345678 → M123A4567)."""
+    text = "여권번호: M12345678\n갱신 후 여권: M123A4567"
+
+    values = [
+        text[f.start : f.end] for f in detect(text) if f.category == "PASSPORT"
+    ]
+
+    assert values == ["M12345678", "M123A4567"]
+
+
+def test_운전면허번호를_탐지한다():
+    """지역코드-연도-일련번호-검사번호. 검사번호 산출식은 공개돼 있지 않다."""
+    text = "운전면허번호: 11-23-456789-70"
+
+    licenses = [f for f in detect(text) if f.category == "LICENSE"]
+
+    assert len(licenses) == 1
+    assert text[licenses[0].start : licenses[0].end] == "11-23-456789-70"
+
+
+def test_앵커가_있으면_하이픈_없는_2020년_이후_주민등록번호도_탐지한다():
+    """관문을 좁힌 대가를 앵커로 되찾는다.
+
+    붙여 쓴 13자리는 검증식과 생년월일을 모두 요구하므로 2020.10 이후 발급분을
+    놓친다. 앞에 "주민등록번호" 가 붙어 있다면 그것이 증거이므로 생년월일만으로
+    충분하다.
+    """
+    text = "주민등록번호=0411303912345"
+
+    rrns = [f for f in detect(text) if f.category == "RRN"]
+
+    assert len(rrns) == 1
+    assert text[rrns[0].start : rrns[0].end] == "0411303912345"
+
+
+def test_앵커가_있으면_구분자_없는_국내전용_카드도_탐지한다():
+    text = "card=9410123456789012"
+
+    cards = [f for f in detect(text) if f.category == "CARD"]
+
+    assert len(cards) == 1
+    assert text[cards[0].start : cards[0].end] == "9410123456789012"
+
+
+def test_앵커가_있으면_하이픈_없는_사업자등록번호도_탐지한다():
+    """10자리 숫자는 초 단위 타임스탬프와 구분되지 않는다. 앵커가 그 차이를 만든다."""
+    text = "사업자등록번호: 3158200005"
+
+    brns = [f for f in detect(text) if f.category == "BRN"]
+
+    assert len(brns) == 1
+    assert text[brns[0].start : brns[0].end] == "3158200005"
+
+
+def test_앵커가_있어도_검증식을_통과하지_못하면_사업자등록번호로_보지_않는다():
+    """앵커는 관문을 하나 면제해줄 뿐, 있는 검증식까지 무르게 하지는 않는다."""
+    text = "사업자등록번호: 1754500951"
+
+    assert [f for f in detect(text) if f.category == "BRN"] == []
+
+
+def test_증거를_담지_않는_값은_앵커만_가깝다고_잡지_않는다():
+    """앵커의 사정거리는 값의 생김새가 증거를 담고 있느냐에 따라 다르다.
+
+    여권번호(영문+숫자 8자), 맨 숫자 계좌번호, 구분자 없는 국내전용 카드는
+    생김새가 아무것도 증명하지 못한다. 이런 값은 `키: 값` 형태를 요구해
+    산문 속 우연한 근접을 배제한다. 셋 다 실제로 나왔던 오탐이다.
+    """
+    for text in (
+        "여권 발급 대기열 A00000001",
+        "이체 수수료 정산 2026080612345678",
+        "카드 결제 모듈 롤백 커밋 9410123456789012",
+    ):
+        assert detect(text) == [], f"오탐: {text!r} → {detect(text)}"

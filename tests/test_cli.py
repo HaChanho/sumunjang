@@ -71,12 +71,12 @@ def test_report는_선언된_한계를_0점으로_공표한다(tmp_path):
     gaps = tmp_path / "gaps"
     gaps.mkdir()
     (gaps / "doc.txt").write_text(
-        "domain: 한계\n---\n입금 계좌는 {{ACCOUNT:110-234-567890}} 입니다",
+        "domain: 한계\n---\n어제 {{NAME:김수현}} 책임이랑 통화했습니다",
         encoding="utf-8",
     )
 
     code, out, _ = _run(["report", str(gaps)])
 
     assert code == 0
-    assert "ACCOUNT" in out
+    assert "NAME" in out
     assert "0.000" in out
