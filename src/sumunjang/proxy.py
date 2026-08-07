@@ -607,7 +607,9 @@ def create_app(
 
         # 업스트림이 내려보낸 추론 서명을 기억해 둔다. 다음 턴에 클라이언트가
         # 그 블록을 되돌려보낼 때, 그것이 진짜 추론인지 판정하는 유일한 근거다.
-        for block in payload.get("content", []):
+        # content 가 목록이 아니면 우리가 다룰 모양이 아니다. 바로 위에서 사전
+        # 여부를 막아 놓고 한 줄 아래를 비워 두면 같은 부류가 그대로 터진다.
+        for block in payload.get("content", []) if isinstance(payload.get("content"), list) else []:
             if isinstance(block, dict):
                 서명 = block.get("signature")
                 본문 = block.get("thinking") or block.get("data")

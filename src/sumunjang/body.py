@@ -125,18 +125,18 @@ def _is_opaque(key: str, value: str, parent: dict, session: Session) -> bool:
     # 원문이 있을 수 없고(인바운드가 모두 가려진 상태라 모델은 원문을 본 적이
     # 없다), 서명이 본문을 보증하므로 본문만 가리면 서명이 보증하지 못하는
     # 본문이 되어 다음 턴이 거부된다.
-    if block_type in ("thinking", "redacted_thinking") and key in (
-        "thinking",
-        "signature",
-        "data",
-    ):
-        서명 = parent.get("signature") or ""
-        본문 = parent.get("thinking") or parent.get("data") or ""
-        return (
-            isinstance(서명, str)
-            and isinstance(본문, str)
-            and session.emitted_thinking(서명, 본문)
-        )
+    if block_type in ("thinking", "redacted_thinking"):
+        # **예외를 받는 그 값 자체로 대조한다.** 형제 키의 값으로 검증하면
+        # 검증 대상과 면제 대상이 갈라진다 — 진짜 짝을 그대로 두고 다른 키에
+        # 원문을 얹으면 그 값만 마스킹을 건너뛰었다. 서명이 보증하는 것은
+        # 그 본문이지 블록 안의 아무 키가 아니다.
+        if key == "signature":
+            본문 = parent.get("thinking") or parent.get("data")
+            return isinstance(본문, str) and session.emitted_thinking(value, 본문)
+        if key in ("thinking", "data"):
+            서명 = parent.get("signature")
+            return isinstance(서명, str) and session.emitted_thinking(서명, value)
+        return False
 
     if key == "data" and block_type == "base64":
         return _opaque_base64(value, str(parent.get("media_type", "")))

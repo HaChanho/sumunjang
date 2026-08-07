@@ -300,3 +300,33 @@ def test_선언한_미디어_타입의_실제_시작_바이트가_있어야_건�
 
     assert not _opaque_base64(가짜, "image/png")
     assert _opaque_base64(진짜, "image/png")
+
+
+def test_추론_블록의_형제_키에_얹은_값은_예외가_아니다():
+    """예외를 받는 값과 검증하는 값이 같아야 한다.
+
+    형제 키의 값으로 검증하면 둘이 갈라진다 — 진짜 (서명, 본문) 짝을 그대로
+    두고 다른 키에 원문을 얹으면 그 값만 마스킹을 건너뛰었다. 프록시가
+    클라이언트에게 직접 건네준 값만 있으면 되는 우회라 특별한 권한도 필요 없다.
+
+    서명이 보증하는 것은 그 본문이지 블록 안의 아무 키가 아니다.
+    """
+    서명, 생각 = "ErUBCkYIBBgCKkBw" * 8, "원래 생각"
+
+    session = Session()
+    session.remember_thinking(서명, 생각)
+
+    얹은것 = {"messages": [{"role": "assistant", "content": [
+        {"type": "thinking", "thinking": 생각, "signature": 서명,
+         "data": f"주민등록번호는 {원문} 입니다"}]}]}
+
+    assert 원문 not in _나간본문(anthropic_mask, 얹은것)
+
+    # 진짜 짝은 그대로 보존된다.
+    나간것 = anthropic_mask(
+        {"messages": [{"role": "assistant", "content": [
+            {"type": "thinking", "thinking": 생각, "signature": 서명}]}]},
+        session,
+    )
+    블록 = 나간것["messages"][0]["content"][0]
+    assert 블록["thinking"] == 생각 and 블록["signature"] == 서명

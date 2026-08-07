@@ -327,7 +327,10 @@ def mask(text: str, session: Session) -> str:
     for category, start, end in _merge_overlapping(findings):
         pieces.append(text[cursor:start])
         n = 정규화좌표.get((start, end))
-        표준형 = scan_text[n[0] : n[1]] if n else None
+        # 겹친 탐지가 합집합으로 병합되면 그 구간은 어떤 개별 탐지와도 달라
+        # 조회가 비고, 그러면 원문 조각이 세션 키가 되어 같은 값이 두 가명을
+        # 받는다. 그때는 원문 구간을 직접 정규화해 쓴다.
+        표준형 = scan_text[n[0] : n[1]] if n else normalize(text[start:end])[0]
         pieces.append(session.placeholder_for(category, text[start:end], 표준형))
         cursor = end
     pieces.append(text[cursor:])
