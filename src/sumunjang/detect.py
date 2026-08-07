@@ -51,6 +51,50 @@ _SECRET_PATTERN = re.compile(
 )
 
 
+# 한국 성씨는 닫힌 집합이다. 앵커("성명:")만으로는 "담당: 미정" 같은 말까지
+# 이름으로 읽히므로 사전으로 한 겹 더 거른다. 인구의 대부분을 덮는 성씨를 담되,
+# 두 글자 성씨를 먼저 둔다 — 정규식 선택지는 앞에서부터 시도되므로 "남궁" 이
+# "남" 에 가려지면 안 된다.
+# 인구의 약 97%를 덮는 상위 50개 성씨. 꼬리를 자른 것은 커버리지 때문이 아니라
+# 오탐 때문이다 — 연·소·도·선·설·명·표·기·금·인·예·사·부 같은 희귀 성씨는
+# 한국어 단어의 첫 음절로도 흔해서(연락, 소속, 도착, 선택, 설정, 명세, 표기,
+# 기간, 금액, 인수, 예정, 사업, 부서) 3%를 더 얻자고 오탐을 몇 배로 늘린다.
+# 두 글자 성씨를 먼저 둔다 — 정규식 선택지는 앞에서부터 시도되므로 "남궁" 이
+# "남" 에 가려지면 안 된다.
+_SURNAMES = (
+    "남궁|황보|선우|제갈|독고|사공|서문|"
+    "김|이|박|최|정|강|조|윤|장|임|한|오|서|신|권|황|안|송|류|전|홍|고|문|양|손|"
+    "배|백|허|유|남|심|노|하|곽|성|차|주|우|구|나|민|진|지|엄|채|원|천|방|공|현"
+)
+
+# 이름은 성씨 + 1~2자, 뒤에 한글이 이어지지 않아야 한다.
+#
+# 길이를 3자로 넓히지 않는 이유: "김수현책임" 처럼 붙여 쓴 직함까지 먹는다.
+# 뒤에 한글이 오면 안 된다는 조건이 오탐을 크게 줄인다 — "연락처는" 이 성씨
+# "연" 으로 읽히던 실제 오탐이 이 조건으로 걸러진다. 대가로 "최윤서입니다"
+# 처럼 조사·서술어가 바로 붙은 형태는 놓치지만, 구조화된 문서에서 이름 뒤는
+# 줄바꿈·공백·쉼표다.
+_NAME_VALUE = rf"(?:{_SURNAMES})[가-힣]{{1,2}}(?![가-힣])"
+
+# 앵커와 값 사이. 콜론이나 등호를 **반드시** 요구한다.
+#
+# 이것이 "구조화된 문서 한정" 이라는 범위 결정을 코드로 강제하는 자리다.
+# 구분자를 선택으로 두면 "담당자 연락처는" 같은 산문까지 앵커에 걸린다.
+# 줄바꿈을 넣지 않아 앵커의 사정거리는 같은 줄까지다 — 넓히면 문서 전체가
+# 앵커 하나에 물들어 오탐이 터진다.
+_GAP = r"[ \t]*[:：=＝][ \t]*"
+
+
+def _anchored(anchors: str, value: str) -> re.Pattern[str]:
+    """앵커가 앞서는 값만 잡는 패턴. 가려지는 것은 `value` 그룹뿐이다.
+
+    체크섬이 없는 식별자는 형태만으로 판별할 수 없다. 계좌번호에는 검증식이
+    없고, 운전면허 검사번호 산출식은 공개돼 있지 않다. 형태만 보고 잡으면
+    오탐이 터지므로, 앞에 붙은 말을 증거로 삼는다.
+    """
+    return re.compile(rf"(?:{anchors}){_GAP}(?P<value>{value})")
+
+
 # 눈에 보이지 않아 탐지를 빠져나가는 문자들. 전각 숫자는 별도 처리가 필요 없다 —
 # 파이썬 정규식의 \d와 int()가 유니코드 십진 숫자를 그대로 인식하기 때문이다.
 _INVISIBLE = "​‌‍⁠﻿"
@@ -191,6 +235,8 @@ _RULES = (
     ("PHONE", _PHONE_PATTERN, None),
     ("EMAIL", _EMAIL_PATTERN, None),
     ("SECRET", _SECRET_PATTERN, None),
+    # 앵커 규칙. 값 자체로는 판별할 수 없어 앞에 붙은 말을 증거로 쓴다.
+    ("NAME", _anchored("성명|이름|고객명|예금주|수취인|대표자|신청인|계약자|가입자|담당자?", _NAME_VALUE), None),
 )
 
 # 이 탐지기가 붙일 수 있는 카테고리 전부. 마스킹 계층이 카테고리마다 정책을
@@ -205,14 +251,17 @@ def detect(text: str) -> list[Finding]:
     findings = []
 
     for category, pattern, validator in _RULES:
+        # 앵커 규칙은 `value` 그룹만 가린다. 앵커("성명:")는 문맥이므로 남겨야
+        # 모델이 가려진 자리가 무엇이었는지 알 수 있다.
+        group = "value" if "value" in pattern.groupindex else 0
         for match in pattern.finditer(scan_text):
-            if validator is not None and not validator(match.group()):
+            if validator is not None and not validator(match.group(group)):
                 continue
             findings.append(
                 Finding(
                     category=category,
-                    start=origin[match.start()],
-                    end=origin[match.end() - 1] + 1,
+                    start=origin[match.start(group)],
+                    end=origin[match.end(group) - 1] + 1,
                 )
             )
 

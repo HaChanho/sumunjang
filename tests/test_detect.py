@@ -233,3 +233,55 @@ def test_제로폭_문자가_끼어든_주민등록번호도_원문_좌표로_�
     assert len(findings) == 1
     assert findings[0].category == "RRN"
     assert text[findings[0].start : findings[0].end] == "900101-123​4568"
+
+
+# ── 문맥 앵커 규칙 ────────────────────────────────────────────────────────
+# 체크섬이 없는 식별자는 형태만으로 판별할 수 없다. 앞에 붙은 말("성명:",
+# "계좌:")을 증거로 삼는다. 원칙은 하나다 — 증거가 없으면 관문을 더 요구한다.
+
+
+def test_앵커가_붙은_한국어_이름을_탐지한다():
+    text = "  성명: 최윤서\n  주민등록번호: 991130-1000008"
+
+    names = [f for f in detect(text) if f.category == "NAME"]
+
+    assert len(names) == 1
+    assert text[names[0].start : names[0].end] == "최윤서"
+
+
+def test_이름_뒤의_직함은_가리지_않는다():
+    """가려야 할 것은 이름이지 직함이 아니다. 직함까지 먹으면 문맥이 사라진다."""
+    text = "- 담당: 김수현 책임"
+
+    names = [f for f in detect(text) if f.category == "NAME"]
+
+    assert len(names) == 1
+    assert text[names[0].start : names[0].end] == "김수현"
+
+
+def test_앵커가_없는_자유서술_속_이름은_잡지_않는다():
+    """선언된 한계다. 문맥 없이 판별하려면 규칙이 아니라 모델이 필요하다.
+
+    goldenset-gaps/G2 에 정답으로 박아 두고 0점으로 공표한다.
+    """
+    text = "어제 김수현 책임이랑 통화했는데 급하시다고 하네요"
+
+    assert [f for f in detect(text) if f.category == "NAME"] == []
+
+
+def test_앵커와_값이_다른_줄에_있으면_잡지_않는다():
+    """앵커의 사정거리는 같은 줄까지다.
+
+    넓히면 문서 전체가 앵커 하나에 물들어 오탐이 터진다. 서식과 로그는 줄 단위로
+    쓰이므로 줄이 자연스러운 경계다.
+    """
+    text = "성명:\n다음 항목은 김수현 책임이 작성함"
+
+    assert [f for f in detect(text) if f.category == "NAME"] == []
+
+
+def test_앵커_뒤라도_성씨가_아니면_이름으로_보지_않는다():
+    """앵커만으로는 부족하다. 한국 성씨는 닫힌 집합이라 사전으로 한 겹 더 거른다."""
+    text = "담당: 미정\n분류: 환불 요청"
+
+    assert [f for f in detect(text) if f.category == "NAME"] == []

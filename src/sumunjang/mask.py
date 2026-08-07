@@ -14,6 +14,7 @@ from .detect import Finding, detect
 # 사람이 읽을 수 있는 이름을 쓴다.
 _LABELS = {
     "RRN": "주민등록번호",
+    "NAME": "이름",
     "BRN": "사업자등록번호",
     "CARD": "카드번호",
     "PHONE": "전화번호",
@@ -71,12 +72,14 @@ class Session:
 #   CARD    금전을 연다. 재발급으로 무효화된다.
 #   PHONE   본인인증 2차 채널(문자 OTP)을 연다. 바꾸는 비용이 크다.
 #   EMAIL   계정 복구 채널을 연다. 바꾸는 비용이 크다.
+#   NAME    그 자체로는 문을 열지 못한다. 동명이인이 흔해 단독으로는 특정도
+#           어렵다. 다만 다른 값과 붙는 순간 특정력이 급격히 오른다.
 #   BRN     아무 문도 열지 못한다. 국세청에서 공개 조회된다.
 #
 # 라벨은 두 독자를 향한다. 모델에게는 가려진 자리가 무엇이었는지 알려 문맥을
 # 유지시키고, 로그를 보는 사람에게는 이 자리가 얼마나 위험했는지 알린다.
 # 겹쳤을 때 덜 민감한 이름을 붙이면 뒤쪽 독자가 위험을 과소평가한다.
-SEVERITY = ("RRN", "SECRET", "CARD", "PHONE", "EMAIL", "BRN")
+SEVERITY = ("RRN", "SECRET", "CARD", "PHONE", "EMAIL", "NAME", "BRN")
 
 
 def _merged_category(overlapping: list[Finding]) -> str:
