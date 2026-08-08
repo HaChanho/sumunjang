@@ -37,6 +37,12 @@ Codex GPT-5.4 를 서로 격리해 여섯 라운드 이중 리뷰를 돌렸고, 
 ### 추가
 
 - **OpenAI 호환 경로** (`/v1/chat/completions`). `OPENAI_BASE_URL` 로 붙습니다.
+- **OpenAI Responses 경로** (`/v1/responses`). **Codex CLI가 쓰는 경로입니다** —
+  OpenAI가 2026년 2월 Codex에서 chat/completions 지원을 완전히 제거해, 이 경로가
+  없으면 Codex는 수문장을 통과할 수 없습니다. 실제로 물려 보고 404를 받아
+  알았습니다. 붙인 뒤 진짜 Codex CLI 0.144.1로 두 턴을 돌려, 도구가 읽은
+  개인정보 8종 13건이 전부 가려지고 화면에는 원문이 돌아오는 것을 확인했습니다
+  (업스트림은 로컬 대역 서버 — 등급은 README 실환경 검증 기록 참조).
 - **`goldenset-gaps`** — 못 잡는다고 선언한 것들을 점수로 공표하는 셋.
 - **`sumunjang report --min-recall/--min-precision`** — 공표 수치를 CI 회귀 게이트로.
 
