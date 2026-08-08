@@ -14,6 +14,7 @@ import pytest
 from sumunjang.anthropic import mask_request as anthropic_mask
 from sumunjang.mask import Session
 from sumunjang.openai import mask_request as openai_mask
+from sumunjang.responses import mask_request as responses_mask
 
 원문 = "900101-1234568"
 
@@ -51,6 +52,44 @@ OPENAI_자리 = {
 }
 
 
+# Responses API 의 자리들. 실제 Codex CLI 0.144.1 이 보낸 요청에서 최상위 키를
+# 그대로 옮겨 왔다 — 상상해서 적으면 진짜와 다른 것을 시험하게 된다. 실제로
+# 도구 이름이 shell 이 아니라 exec_command 였고, instructions 는 20,751 자였다.
+RESPONSES_자리 = {
+    "instructions": {"instructions": f"담당 {원문}", "input": []},
+    "input[].content[].text": {"input": [{"type": "message", "role": "user", "content": [
+        {"type": "input_text", "text": f"주민번호 {원문}"}]}]},
+    "function_call_output.output": {"input": [
+        {"type": "function_call_output", "call_id": "c1", "output": f"user_rrn={원문}"}]},
+    "요청의 function_call.arguments": {"input": [
+        {"type": "function_call", "call_id": "c1", "name": "w", "arguments": f'{{"t":"{원문}"}}'}]},
+    "input 이 맨 문자열": {"input": f"주민번호 {원문} 조회"},
+    "tools[].description": {"input": [], "tools": [
+        {"type": "function", "name": "exec_command", "description": f"고객 {원문} 조회"}]},
+    "tools[].parameters": {"input": [], "tools": [{"type": "function", "name": "x", "parameters": {
+        "type": "object", "properties": {"cmd": {"type": "string", "description": f"예: {원문}"}}}}]},
+    "prompt_cache_key": {"input": [], "prompt_cache_key": 원문},
+    "client_metadata": {"input": [], "client_metadata": {"session": 원문}},
+    "metadata": {"input": [], "metadata": {"user": 원문}},
+    "text.format 스키마": {"input": [], "text": {"format": {
+        "type": "json_schema", "name": "r", "schema": {"properties": {"a": {"description": 원문}}}}}},
+    "모르는 항목 타입": {"input": [{"type": "훗날_생길_항목", "text": f"주민번호 {원문}"}]},
+    "모르는 최상위 필드": {"input": [], "훗날_생길_필드": f"주민번호 {원문}"},
+    # 아래 셋은 예외를 노린 우회다. 예외 판정은 네 라운드 연속 뚫린 자리라,
+    # 프로토콜이 바뀌면 같은 수법을 다시 시험한다. 프로토콜마다 "추론 블록" 을
+    # 부르는 이름이 다르다는 점(thinking ↔ reasoning)이 특히 위험하다 —
+    # 예외 목록이 이름으로 판정하면 새 이름은 예외가 아니고, 반대로 새 이름을
+    # 예외에 넣으면 요청자가 그 이름을 적어 넣는 것으로 끝난다.
+    "추론인 척하는 reasoning 항목": {"input": [{"type": "reasoning", "id": "rs_1",
+        "encrypted_content": f"주민번호 {원문}",
+        "summary": [{"type": "summary_text", "text": f"주민번호 {원문}"}]}]},
+    "input_file 에 실린 평문 data URI": {"input": [{"type": "message", "role": "user", "content": [
+        {"type": "input_file", "file_data": f"data:text/plain;base64,주민번호 {원문}"}]}]},
+    "input_image 의 image_url": {"input": [{"type": "message", "role": "user", "content": [
+        {"type": "input_image", "image_url": f"data:image/png;base64,{원문}"}]}]},
+}
+
+
 @pytest.mark.parametrize("자리", ANTHROPIC_자리)
 def test_Anthropic_본문의_어느_자리에도_원문이_남지_않는다(자리):
     assert 원문 not in _나간본문(anthropic_mask, ANTHROPIC_자리[자리]), f"{자리} 에서 유출"
@@ -59,6 +98,17 @@ def test_Anthropic_본문의_어느_자리에도_원문이_남지_않는다(자�
 @pytest.mark.parametrize("자리", OPENAI_자리)
 def test_OpenAI_본문의_어느_자리에도_원문이_남지_않는다(자리):
     assert 원문 not in _나간본문(openai_mask, OPENAI_자리[자리]), f"{자리} 에서 유출"
+
+
+@pytest.mark.parametrize("자리", RESPONSES_자리)
+def test_Responses_본문의_어느_자리에도_원문이_남지_않는다(자리):
+    """세 번째 프로토콜도 같은 검사를 받는다.
+
+    프로토콜이 늘 때 이 표를 함께 늘리지 않으면, 마스킹이 프로토콜과 무관하다는
+    주장이 검사 없이 남는다. 새 프로토콜은 표에 줄 하나라는 말은 **시험도 줄
+    하나**라는 뜻이어야 한다.
+    """
+    assert 원문 not in _나간본문(responses_mask, RESPONSES_자리[자리]), f"{자리} 에서 유출"
 
 
 def test_훼손되면_요청이_깨지는_자리는_건드리지_않는다():
