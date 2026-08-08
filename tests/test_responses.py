@@ -228,3 +228,177 @@ def test_responses_경로가_마스킹돼_전달된다():
     assert "hong@daehan-tech.co.kr" not in 나간것
     assert "[이메일_1]" in 나간것
     assert "[주민등록번호_1]" in 나간것
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# 스트리밍
+#
+# Codex 는 SSE 로 받는다. 통짜 JSON 으로 답하면 클라이언트가 스트림을 기다리다
+# 끊긴다. Anthropic·chat 과 마찬가지로 업스트림에는 통짜로 요청해 복원을 끝낸
+# 뒤 클라이언트에게만 이벤트 열로 다시 흘려보낸다.
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def _이벤트들(payload: bytes) -> list[tuple[str, dict]]:
+    """SSE 바이트를 (이벤트 이름, 데이터) 목록으로 푼다."""
+    결과 = []
+    for 덩이 in payload.decode().split("\n\n"):
+        if not 덩이.strip():
+            continue
+        이름 = 자료 = None
+        for 줄 in 덩이.splitlines():
+            if 줄.startswith("event: "):
+                이름 = 줄[len("event: "):]
+            elif 줄.startswith("data: "):
+                자료 = 줄[len("data: "):]
+        결과.append((이름, json.loads(자료) if 자료 else None))
+    return 결과
+
+
+def test_스트리밍은_텍스트를_delta_로_흘린다():
+    from sumunjang.proxy import _responses_sse
+
+    이벤트 = _이벤트들(
+        _responses_sse(
+            {
+                "id": "resp_1",
+                "object": "response",
+                "status": "completed",
+                "output": [
+                    {
+                        "type": "message",
+                        "id": "msg_1",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "확인했습니다"}],
+                    }
+                ],
+            }
+        )
+    )
+    이름들 = [이름 for 이름, _ in 이벤트]
+
+    assert 이름들[0] == "response.created"
+    assert 이름들[-1] == "response.completed"
+    assert "response.output_text.delta" in 이름들
+
+    델타 = [자료 for 이름, 자료 in 이벤트 if 이름 == "response.output_text.delta"]
+    assert "".join(d["delta"] for d in 델타) == "확인했습니다"
+
+
+def test_시작_껍데기에는_내용을_담지_않는다():
+    """클라이언트는 added 의 내용을 무시하고 delta 만 누적한다.
+
+    Anthropic 쪽에서 이걸 어겨 thinking 이 빈 채로 남았고, 다음 턴 요청이
+    400 으로 거부됐다. 실제 왕복에서만 드러난 결함이라 여기에도 못박는다.
+    """
+    from sumunjang.proxy import _responses_sse
+
+    이벤트 = _이벤트들(
+        _responses_sse(
+            {
+                "output": [
+                    {
+                        "type": "message",
+                        "id": "msg_1",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "확인했습니다"}],
+                    }
+                ]
+            }
+        )
+    )
+
+    추가 = [자료 for 이름, 자료 in 이벤트 if 이름 == "response.output_item.added"]
+    assert 추가[0]["item"]["content"] == []
+
+    파트 = [자료 for 이름, 자료 in 이벤트 if 이름 == "response.content_part.added"]
+    assert 파트[0]["part"]["text"] == ""
+
+
+def test_도구_호출은_인자를_delta_로_흘린다():
+    from sumunjang.proxy import _responses_sse
+
+    이벤트 = _이벤트들(
+        _responses_sse(
+            {
+                "output": [
+                    {
+                        "type": "function_call",
+                        "id": "fc_1",
+                        "call_id": "call_1",
+                        "name": "shell",
+                        "arguments": '{"command":["ls"]}',
+                    }
+                ]
+            }
+        )
+    )
+    이름들 = [이름 for 이름, _ in 이벤트]
+
+    assert "response.function_call_arguments.delta" in 이름들
+    델타 = [자료 for 이름, 자료 in 이벤트 if 이름 == "response.function_call_arguments.delta"]
+    assert "".join(d["delta"] for d in 델타) == '{"command":["ls"]}'
+
+    추가 = [자료 for 이름, 자료 in 이벤트 if 이름 == "response.output_item.added"]
+    assert 추가[0]["item"]["arguments"] == ""
+
+
+def test_마지막_이벤트가_완성본을_싣는다():
+    """클라이언트가 delta 를 못 따라잡아도 completed 한 건으로 복구할 수 있어야 한다."""
+    from sumunjang.proxy import _responses_sse
+
+    완성 = {
+        "id": "resp_1",
+        "status": "completed",
+        "output": [
+            {
+                "type": "message",
+                "id": "msg_1",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "900101-1234568 확인"}],
+            }
+        ],
+        "usage": {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3},
+    }
+
+    이벤트 = _이벤트들(_responses_sse(완성))
+    마지막 = 이벤트[-1][1]
+
+    assert 마지막["type"] == "response.completed"
+    assert 마지막["response"]["output"][0]["content"][0]["text"] == "900101-1234568 확인"
+    assert 마지막["response"]["usage"]["total_tokens"] == 3
+
+
+def test_스트리밍_요청에_SSE_로_답한다():
+    """프로토콜 표에 sse 가 None 이면 스트림을 요청해도 통짜 JSON 이 나간다."""
+    업스트림 = _업스트림()
+
+    async def 시나리오():
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=업스트림), base_url="http://upstream"
+        ) as upstream_client:
+            app = create_app(upstream_base_url="http://upstream", client=upstream_client)
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://proxy"
+            ) as proxy_client:
+                return await proxy_client.post(
+                    "/v1/responses",
+                    json={
+                        "model": "gpt-5",
+                        "stream": True,
+                        "input": [
+                            {
+                                "type": "message",
+                                "role": "user",
+                                "content": [{"type": "input_text", "text": "안녕"}],
+                            }
+                        ],
+                    },
+                )
+
+    응답 = asyncio.run(시나리오())
+
+    assert 응답.headers["content-type"].startswith("text/event-stream")
+    assert b"response.completed" in 응답.content
+    # 업스트림에는 stream 을 떼고 통짜로 요청한다
+    assert "stream" not in 업스트림.received

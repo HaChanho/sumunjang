@@ -229,6 +229,107 @@ def _openai_sse(message: dict) -> bytes:
     return payload + b"data: [DONE]\n\n"
 
 
+# 항목 종류마다 "내용이 담기는 칸" 이 다르다. 시작 이벤트에서 비워 둘 자리이기도 하다.
+_RESPONSES_빈칸 = {
+    "message": ("content", []),
+    "function_call": ("arguments", ""),
+    "reasoning": ("summary", []),
+}
+
+
+def _responses_sse(response: dict) -> bytes:
+    """완성된 response 를 Responses API 의 의미 이벤트 열로 펼친다.
+
+    앞의 둘과 또 형식이 다르다. chat 의 청크에는 `event:` 줄이 없고 "이 자리에
+    이만큼 붙여라" 만 실린다. 여기서는 이벤트 이름이 **무엇이 일어났는지**를
+    말하고(`response.output_text.delta`), 항목이 열리고 닫히는 생애주기가
+    그대로 드러난다.
+
+    Anthropic 쪽에서 배운 것을 그대로 지킨다 — **시작 이벤트의 껍데기는 비어야
+    한다.** 클라이언트는 added 의 내용을 무시하고 delta 만 누적하므로, 여기에
+    내용을 담으면 그대로 유실된다. 실제 왕복에서 thinking 이 빈 채로 남아 다음
+    턴 요청이 400 으로 거부됐던 자리다.
+    """
+    번호 = 0
+
+    def 이벤트(이름: str, 자료: dict) -> bytes:
+        nonlocal 번호
+        본 = {"type": 이름, "sequence_number": 번호, **자료}
+        번호 += 1
+        return f"event: {이름}\ndata: {json.dumps(본, ensure_ascii=False)}\n\n".encode()
+
+    조각들: list[bytes] = []
+    진행중 = {**response, "output": [], "status": "in_progress"}
+    조각들.append(이벤트("response.created", {"response": 진행중}))
+    조각들.append(이벤트("response.in_progress", {"response": 진행중}))
+
+    항목들 = response.get("output")
+    for 자리, item in enumerate(항목들 if isinstance(항목들, list) else []):
+        if not isinstance(item, dict):
+            continue
+        종류 = item.get("type")
+        항목_id = item.get("id", "")
+
+        칸, 빈값 = _RESPONSES_빈칸.get(종류, (None, None))
+        껍데기 = {**item, 칸: 빈값} if 칸 else dict(item)
+        조각들.append(
+            이벤트("response.output_item.added", {"output_index": 자리, "item": 껍데기})
+        )
+
+        자리표 = {"item_id": 항목_id, "output_index": 자리}
+
+        if 종류 == "message":
+            parts = item.get("content")
+            for 칸번호, part in enumerate(parts if isinstance(parts, list) else []):
+                if not isinstance(part, dict):
+                    continue
+                # 사람이 읽는 칸은 둘이다. 거절만 흘리지 않으면 거절 응답이
+                # 내용 없는 빈 스트림이 되어 사용자는 왜 답이 없는지 모른다.
+                필드 = "text" if isinstance(part.get("text"), str) else "refusal"
+                글 = part.get(필드)
+                if not isinstance(글, str):
+                    continue
+                갈래 = "output_text" if 필드 == "text" else "refusal"
+                자리표2 = {**자리표, "content_index": 칸번호}
+
+                조각들.append(
+                    이벤트(
+                        "response.content_part.added",
+                        {**자리표2, "part": {**part, 필드: ""}},
+                    )
+                )
+                조각들.append(이벤트(f"response.{갈래}.delta", {**자리표2, "delta": 글}))
+                조각들.append(이벤트(f"response.{갈래}.done", {**자리표2, 필드: 글}))
+                조각들.append(
+                    이벤트("response.content_part.done", {**자리표2, "part": part})
+                )
+
+        elif 종류 == "function_call":
+            인자 = item.get("arguments")
+            if isinstance(인자, str):
+                조각들.append(
+                    이벤트(
+                        "response.function_call_arguments.delta",
+                        {**자리표, "delta": 인자},
+                    )
+                )
+                조각들.append(
+                    이벤트(
+                        "response.function_call_arguments.done",
+                        {**자리표, "arguments": 인자},
+                    )
+                )
+
+        조각들.append(
+            이벤트("response.output_item.done", {"output_index": 자리, "item": item})
+        )
+
+    # 마지막 한 건에 완성본을 통째로 싣는다. delta 를 놓친 클라이언트도
+    # 여기서 복구할 수 있어야 한다.
+    조각들.append(이벤트("response.completed", {"response": response}))
+    return b"".join(조각들)
+
+
 async def _send_sse(send, payload: bytes, extra_headers=()) -> None:
     await send(
         {
@@ -317,7 +418,10 @@ _OPENAI = _Protocol(
     openai_mask_request, openai_restore_response, openai_count_masked, _openai_sse
 )
 _RESPONSES = _Protocol(
-    responses_mask_request, responses_restore_response, responses_count_masked, None
+    responses_mask_request,
+    responses_restore_response,
+    responses_count_masked,
+    _responses_sse,
 )
 
 # 마스킹해서 넘기는 경로. 기본값은 통과가 아니라 차단이므로, 여기 없는 경로는
