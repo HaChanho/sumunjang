@@ -22,6 +22,9 @@ from .mask import Session, SessionFull, mask
 from .openai import count_masked as openai_count_masked
 from .openai import mask_request as openai_mask_request
 from .openai import restore_response as openai_restore_response
+from .responses import count_masked as responses_count_masked
+from .responses import mask_request as responses_mask_request
+from .responses import restore_response as responses_restore_response
 
 ANTHROPIC_API = "https://api.anthropic.com"
 
@@ -313,6 +316,9 @@ _ANTHROPIC = _Protocol(mask_request, restore_response, count_masked, _anthropic_
 _OPENAI = _Protocol(
     openai_mask_request, openai_restore_response, openai_count_masked, _openai_sse
 )
+_RESPONSES = _Protocol(
+    responses_mask_request, responses_restore_response, responses_count_masked, None
+)
 
 # 마스킹해서 넘기는 경로. 기본값은 통과가 아니라 차단이므로, 여기 없는 경로는
 # 업스트림에 닿지 않는다.
@@ -324,6 +330,7 @@ _PROTOCOLS = {
     "/v1/messages": _ANTHROPIC,
     "/v1/messages/count_tokens": _ANTHROPIC,
     "/v1/chat/completions": _OPENAI,
+    "/v1/responses": _RESPONSES,
 }
 
 
