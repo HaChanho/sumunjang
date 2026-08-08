@@ -55,12 +55,26 @@ jobs:
       - name: 저장소 밖에서 설치·실행
         # 게시는 되돌릴 수 없다. PyPI 는 같은 버전의 재업로드를 허용하지 않으므로,
         # 깨진 배포물을 올리면 버전을 태워야 한다. 올리기 전에 마지막으로 시험한다.
+        #
+        # 0.1.0 이 README 의 공표 수치를 못 내는 채로 올라간 뒤에 이 검사를 넣었다.
+        # 그때는 이 워크플로를 타지 않고 로컬 dist 에서 손으로 올라갔지만, 탔더라도
+        # report 를 돌리기만 하고 결과를 안 봤으므로 통과했을 것이다.
         run: |
           mkdir -p /tmp/clean && cd /tmp/clean
           uv venv
           uv pip install --python .venv/bin/python "$GITHUB_WORKSPACE"/dist/*.whl
           echo "고객 900101-1234568 / 성명: 최윤서" | .venv/bin/sumunjang mask -
-          .venv/bin/sumunjang report
+
+          # 세 셋이 다 실렸는가. --only 는 없는 이름을 오류로 올린다.
+          .venv/bin/sumunjang report \
+            --only goldenset --only goldenset-hard --only goldenset-gaps \
+            --min-recall 0
+
+          # 만점 셋 둘은 값까지 본다. gaps 의 정확한 값은 tests/test_readme.py 가
+          # 소스 쪽에서 잠근다 — 여기에도 적으면 공표 수치가 세 군데가 된다.
+          .venv/bin/sumunjang report \
+            --only goldenset --only goldenset-hard \
+            --min-recall 1.0 --min-precision 1.0
 
       - uses: actions/upload-artifact@v4
         with:

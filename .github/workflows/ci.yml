@@ -64,12 +64,27 @@ jobs:
       - name: 저장소 밖에서 설치·실행
         # 검증기관은 클론하지 않고 설치본만 받을 수 있다. 골든셋이 wheel 에
         # 실려 있지 않으면 report 가 여기서 깨진다.
+        #
+        # report 를 돌리기만 하고 결과를 보지 않으면 출력이 예쁘기만 해도 통과한다.
+        # README 가 약속한 것은 저장소가 아니라 `pip install` 뒤의 `sumunjang report`
+        # 이므로, 설치본에도 소스와 같은 계약을 건다.
         run: |
           mkdir -p /tmp/clean && cd /tmp/clean
           uv venv
           uv pip install --python .venv/bin/python "$GITHUB_WORKSPACE"/dist/*.whl
           echo "고객 900101-1234568 / 성명: 최윤서" | .venv/bin/sumunjang mask -
-          .venv/bin/sumunjang report
+
+          # 세 셋이 다 실렸는가. --only 는 없는 이름을 오류로 올리므로, 셋이
+          # 통째로 빠진 wheel 이 여기서 걸린다.
+          .venv/bin/sumunjang report \
+            --only goldenset --only goldenset-hard --only goldenset-gaps \
+            --min-recall 0
+
+          # 만점 셋 둘은 값까지 본다. gaps 의 정확한 값은 tests/test_readme.py 가
+          # 소스 쪽에서 잠근다 — 여기에도 적으면 공표 수치가 세 군데가 된다.
+          .venv/bin/sumunjang report \
+            --only goldenset --only goldenset-hard \
+            --min-recall 1.0 --min-precision 1.0
 
   license:
     name: 라이선스 (의존성 계보)
