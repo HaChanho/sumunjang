@@ -1,6 +1,6 @@
 [project]
 name = "sumunjang"
-version = "0.1.0"
+version = "0.2.0"
 description = "AI API 경계에서 한국 개인정보를 막는 로컬 게이트웨이 — base_url 한 줄로 붙이는 온디바이스 마스킹 프록시"
 readme = "README.md"
 requires-python = ">=3.10"
